@@ -4,7 +4,7 @@
 
 import { api } from './api.js';
 import { $, h, clear, toast } from './dom.js';
-import { t, getLang, errorText } from './i18n.js';
+import { t, errorText } from './i18n.js';
 
 const MEDAL_ICON = ['', '🥉', '🥈', '🥇'];
 const S = { days: 30, onOpenIdea: null, onOpenBoard: null };
@@ -33,10 +33,13 @@ async function load() {
 
 const startCmd = (path) => `cd "${path}" && claude`;
 
+const scores = (idea) => idea.sum == null ? '' : `Use ${idea.originality} · Buildable ${idea.feasibility} · Fit ${idea.impact}`;
+
 function ideaLine(i, boardTitle) {
   return h('button', { class: 'rank-item', onclick: () => { close(); S.onOpenIdea?.(i.boardId, i.id); } },
     h('span', { class: 'grow' }, i.title),
     boardTitle ? h('span', { class: 'muted small' }, boardTitle) : null,
+    i.sum != null ? h('span', { class: 'muted small' }, scores(i)) : null,
     h('span', { class: 'rank-score' }, `${i.sum ?? ''} ${i.medal ? MEDAL_ICON[i.medal] : ''}`),
   );
 }
@@ -49,7 +52,7 @@ function render(r) {
   const list = (items) => h('ul', {}, items.map((x) => h('li', {}, x)));
 
   clear(root,
-    h('header', { class: 'dash-head' },
+    h('header', { class: 'report-head' },
       h('h2', {}, t('report')),
       h('div', { class: 'seg-row', role: 'group' }, period(7), period(30), period(90)),
       h('button', { class: 'btn small', onclick: exportReport }, t('export')),
@@ -69,7 +72,7 @@ function render(r) {
       ),
       s
         ? [
-            h('p', { class: 'muted small' }, t('conclusionsFrom', { date: new Date(s.createdAt.replace(' ', 'T') + 'Z').toLocaleString(getLang() === 'sv' ? 'sv-SE' : 'en-GB'), n: s.days })),
+            h('p', { class: 'muted small' }, t('conclusionsFrom', { date: new Date(s.createdAt.replace(' ', 'T') + 'Z').toLocaleString(undefined), n: s.days })),
             h('p', { class: 'headline' }, s.headline),
             h('div', { class: 'grid2' },
               h('div', {}, h('h4', {}, t('insights')), list(s.insights)),
@@ -92,6 +95,7 @@ function render(r) {
                 h('button', { class: 'linkish', onclick: () => { close(); S.onOpenIdea?.(p.boardId, p.id); } }, h('strong', {}, p.title)),
                 h('span', { class: 'muted small' }, `${p.boardTitle}${p.sum != null ? ` · ${p.sum}/15 ${MEDAL_ICON[p.medal] ?? ''}` : ''}`),
               ),
+              p.sum != null ? h('p', { class: 'small muted' }, scores(p)) : null,
               h('code', { class: 'cmd' }, startCmd(p.path)),
               h('div', { class: 'row' },
                 h('button', { class: 'btn small', onclick: () => navigator.clipboard.writeText(startCmd(p.path)).then(() => toast(t('copied'))) }, t('copyStart')),
@@ -131,7 +135,7 @@ async function synthesize(btn) {
   btn.disabled = true;
   btn.textContent = t('thinking');
   try {
-    render(await api('POST', '/api/report/synthesis', { days: S.days, lang: getLang() }));
+    render(await api('POST', '/api/report/synthesis', { days: S.days }));
   } catch (e) {
     toast(errorText(e), 'error', 8000);
     btn.disabled = false;
@@ -140,8 +144,8 @@ async function synthesize(btn) {
 
 async function exportReport() {
   try {
-    const md = await api('GET', `/api/report.md?days=${S.days}&lang=${getLang()}`);
-    const a = h('a', { href: URL.createObjectURL(new Blob([md], { type: 'text/markdown' })), download: `rapport-${new Date().toISOString().slice(0, 10)}.md` });
+    const md = await api('GET', `/api/report.md?days=${S.days}`);
+    const a = h('a', { href: URL.createObjectURL(new Blob([md], { type: 'text/markdown' })), download: `report-${new Date().toISOString().slice(0, 10)}.md` });
     a.click();
     URL.revokeObjectURL(a.href);
   } catch (e) {

@@ -143,8 +143,7 @@ main { display: flex; min-height: 0; }
 .spinner { width: 14px; height: 14px; border: 2px solid rgba(245,197,66,.3); border-top-color: var(--gold); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
-.chip { border: 1px solid var(--line); background: transparent; border-radius: 999px; padding: 2px 10px; font-size: 12px; color: var(--text-2); cursor: pointer; }
-.chip:hover { border-color: var(--accent); color: var(--text); }
+.chip { border: 1px solid var(--line); background: transparent; border-radius: 999px; padding: 2px 10px; font-size: 12px; color: var(--text-2); }
 .seg-row { display: flex; gap: 4px; align-items: center; margin: 10px 0; flex-wrap: wrap; }
 .seg { border: 1px solid var(--line); background: transparent; border-radius: 7px; padding: 3px 9px; cursor: pointer; color: var(--text-2); }
 .seg.on { background: #1c2a40; border-color: var(--accent); color: var(--text); }
@@ -200,8 +199,8 @@ legend { padding: 0 6px; color: var(--text-2); font-weight: 600; }
 .badge.ok { border-color: #2f6a55; color: #a6e6cd; }
 .badge.warn { border-color: #6b5521; color: var(--gold); }
 
-/* ---------- dashboard */
-#dashboard, #report { position: fixed; inset: 0; z-index: 30; background: var(--bg); overflow: auto; padding: 18px 24px 40px; }
+/* ---------- report */
+#report { position: fixed; inset: 0; z-index: 30; background: var(--bg); overflow: auto; padding: 18px 24px 40px; }
 .report-block { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; margin: 0 0 14px; }
 .report-block h3, .report-board h3 { margin: 4px 0 8px; font-size: 15px; }
 .report-block h4, .report-board h4 { margin: 10px 0 4px; font-size: 13px; color: var(--text-2); }
@@ -213,42 +212,18 @@ legend { padding: 0 6px; color: var(--text-2); font-weight: 600; }
 .report-boards { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
 .report-board { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; }
 .board-summary p { margin: 4px 0; }
-.dash-head { display: flex; align-items: center; gap: 16px; }
-.dash-head h2 { margin: 0; flex: 1; }
+.report-head { display: flex; align-items: center; gap: 16px; }
+.report-head h2 { margin: 0; flex: 1; }
 .tiles { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 12px; margin: 18px 0; }
 .tile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }
 .tile-label { font-size: 12px; color: var(--text-2); }
 .tile-value { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.dash-body { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 18px; }
-.trend-table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
-.trend-table th { text-align: left; font-size: 12px; font-weight: 500; color: var(--muted); padding: 8px 10px; border-bottom: 1px solid var(--line); }
-.trend-table td { padding: 6px 10px; border-bottom: 1px solid #20242d; }
-.trend-table tr { cursor: pointer; }
-.trend-table tbody tr:hover, .trend-table tr.on { background: #1a2130; }
-.num { text-align: right; font-variant-numeric: tabular-nums; }
-.spark { display: block; overflow: visible; }
-.spark .base { stroke: #2a2f3a; stroke-width: 1; }
-.spark-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
-.spark-now { fill: var(--accent); }
-.spark .hair { stroke: var(--muted); stroke-width: 1; }
-.spark-dot { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
-.delta { white-space: nowrap; color: var(--text-2); }
-.delta.up { color: var(--text); }
-.jury { display: inline-flex; align-items: center; gap: 8px; }
-.jury-track { width: 80px; height: 8px; border-radius: 4px; background: var(--accent-track); display: inline-block; overflow: hidden; }
-.jury-fill { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
-.jury-num { font-variant-numeric: tabular-nums; color: var(--text-2); font-size: 12px; }
-.dash-side section { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 12px; }
-.dash-side section:empty { display: none; }
-.dash-side h3 { margin: 4px 0 8px; font-size: 14px; }
-.board-kw { margin: 8px 0; }
-.drill-list { list-style: none; padding: 0; margin: 0; }
-#viz-tip, #hovercard {
+#hovercard {
   position: fixed; z-index: 50; pointer-events: none; opacity: 0; transition: opacity .12s;
   background: #232835; border: 1px solid #3a4150; border-radius: 8px; padding: 6px 10px; font-size: 12px;
   box-shadow: 0 8px 24px rgba(0,0,0,.4);
 }
-#viz-tip.show, #hovercard.show { opacity: 1; }
+#hovercard.show { opacity: 1; }
 #hovercard { max-width: 320px; }
 #hovercard p { margin: 4px 0; color: var(--text-2); }
 
@@ -259,25 +234,7 @@ legend { padding: 0 6px; color: var(--text-2); font-weight: 600; }
 .toast.error { border-left-color: var(--danger); }
 .toast.out { opacity: 0; transform: translateY(6px); }
 
-/* ---------- exhibition */
-#exhibit-overlay { display: none; }
-/* The hidden top bar leaves the grid entirely, so main is the only row. */
-body.exhibit { grid-template-rows: 1fr; }
-body.exhibit #topbar, body.exhibit #panel, body.exhibit #leads-panel, body.exhibit #zoom { display: none; }
-body.exhibit #exhibit-overlay {
-  display: block; position: absolute; left: 16px; top: 14px; max-width: min(660px, 52vw); pointer-events: none;
-  padding: 12px 18px 14px; border-radius: 14px; text-shadow: 0 2px 12px rgba(0,0,0,.9);
-  background: radial-gradient(ellipse at top left, rgba(15,17,22,.92) 40%, rgba(15,17,22,0) 75%);
-}
-#ex-title { font-size: 44px; margin: 0; letter-spacing: -.02em; }
-#ex-goal { font-size: 20px; color: var(--text-2); margin: 6px 0 12px; }
-#ex-status { color: var(--good); font-size: 15px; }
-#ex-top { list-style: none; padding: 0; font-size: 18px; }
-#ex-top li { margin: 6px 0; }
-body.exhibit #seed-input { font-size: 20px; padding: 18px 22px; }
-
 @media (max-width: 1100px) {
   #panel { width: 300px; }
   .bar-right .btn.ghost { padding: 6px 8px; }
-  .dash-body { grid-template-columns: 1fr; }
 }

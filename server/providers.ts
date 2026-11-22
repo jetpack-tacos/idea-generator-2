@@ -1,104 +1,55 @@
-// One chat interface over many providers. A model is written "provider:model",
-// e.g. "openrouter:anthropic/claude-sonnet-5.5", "anthropic:claude-opus-5-5",
-// "ollama:qwen3:8b". A bare "vendor/model" means OpenRouter.
-//
-// App settings (keys, base URLs, models per role) live in the BROWSER's
-// localStorage and are pushed to the server, which keeps them in memory only.
-// Environment variables are a fallback for keys.
-
 import Anthropic from '@anthropic-ai/sdk';
+import defaults from '../settings.example.json' with { type: 'json' };
 
-export type ProviderId = 'openrouter' | 'anthropic' | 'openai' | 'azure' | 'ollama' | 'mlx' | 'lmstudio' | 'custom';
+export type ProviderId = 'openrouter' | 'anthropic' | 'openai' | 'deepseek' | 'zai';
 export type Role = 'distill' | 'expand' | 'combine' | 'judge' | 'summary' | 'research' | 'x' | 'brief';
 export const ROLES: Role[] = ['distill', 'expand', 'combine', 'judge', 'summary', 'research', 'x', 'brief'];
 
 export type AppSettings = {
-  keys: Partial<Record<ProviderId, string>>;
-  baseUrls: Partial<Record<ProviderId, string>>;
   models: Record<Role, string>;
   projectsRoot: string;
   /** Safety net across all boards, in USD per local calendar day. */
   maxUsdPerDay: number;
+  activeHours: { start: string; end: string };
 };
 
-const SONNET = 'openrouter:anthropic/claude-sonnet-5.5';
-export const DEFAULT_APP_SETTINGS: AppSettings = {
-  keys: {},
-  baseUrls: {
-    ollama: 'http://localhost:11434',
-    mlx: 'http://localhost:8080/v1',
-    lmstudio: 'http://localhost:1234/v1',
-    azure: '',
-    custom: '',
-  },
-  // Sonnet 5.5: calibrated judge, idiomatic Swedish. Grok: the only route that can search X.
-  models: { distill: SONNET, expand: SONNET, combine: SONNET, judge: SONNET, summary: SONNET, research: SONNET, x: 'openrouter:x-ai/grok-4.3', brief: SONNET },
-  projectsRoot: '~/Projekt/idea-projects',
-  maxUsdPerDay: 5,
-};
+export const DEFAULT_APP_SETTINGS: AppSettings = defaults;
 
 type ProviderDef = {
   label: string;
-  type: 'openai' | 'anthropic' | 'ollama';
+  type: 'openai' | 'anthropic';
   base?: string;
   env?: string;
-  needsKey: boolean;
-  local?: boolean;
   /** Can run OpenRouter's web-search plugin (needed for the X scout). */
   search?: boolean;
-  note?: string;
 };
 
 export const PROVIDERS: Record<ProviderId, ProviderDef> = {
-  openrouter: { label: 'OpenRouter', type: 'openai', base: 'https://openrouter.ai/api/v1', env: 'OPENROUTER_API_KEY', needsKey: true, search: true },
-  anthropic: { label: 'Anthropic', type: 'anthropic', env: 'ANTHROPIC_API_KEY', needsKey: true },
-  openai: { label: 'OpenAI', type: 'openai', base: 'https://api.openai.com/v1', env: 'OPENAI_API_KEY', needsKey: true },
-  azure: {
-    label: 'Azure OpenAI / Microsoft Foundry (Copilot models)', type: 'openai', env: 'AZURE_OPENAI_API_KEY', needsKey: true,
-    note: 'Neither GitHub Copilot nor Microsoft Copilot has a completion API for apps, and GitHub Models was retired on 30 July 2026 (GitHub points to Microsoft Foundry). The models behind both Copilots are reachable here: base URL https://<resource>.openai.azure.com/openai/v1, model = deployment name.',
-  },
-  ollama: { label: 'Ollama (local)', type: 'ollama', needsKey: false, local: true },
-  mlx: { label: 'MLX · mlx_lm.server (local)', type: 'openai', needsKey: false, local: true },
-  lmstudio: { label: 'LM Studio (local)', type: 'openai', needsKey: false, local: true },
-  custom: { label: 'Other OpenAI-compatible', type: 'openai', env: 'CUSTOM_API_KEY', needsKey: false },
+  openrouter: { label: 'OpenRouter', type: 'openai', base: 'https://openrouter.ai/api/v1', env: 'OPENROUTER_API_KEY', search: true },
+  anthropic: { label: 'Anthropic', type: 'anthropic', env: 'ANTHROPIC_API_KEY' },
+  openai: { label: 'OpenAI', type: 'openai', base: 'https://api.openai.com/v1', env: 'OPENAI_API_KEY' },
+  deepseek: { label: 'DeepSeek', type: 'openai', base: 'https://api.deepseek.com', env: 'DEEPSEEK_API_KEY' },
+  zai: { label: 'Z.ai', type: 'openai', base: 'https://api.z.ai/api/paas/v4', env: 'ZAI_API_KEY' },
 };
 
 export function parseModel(ref: string): { provider: ProviderId; model: string } {
   const i = ref.indexOf(':');
   const head = i > 0 ? ref.slice(0, i) : '';
-  if (head in PROVIDERS) return { provider: head as ProviderId, model: ref.slice(i + 1) };
-  return { provider: 'openrouter', model: ref };
+  // Bare OpenRouter model slugs can have tags such as vendor/model:free.
+  if (Object.hasOwn(PROVIDERS, head) && ref.slice(i + 1)) return { provider: head as ProviderId, model: ref.slice(i + 1) };
+  if (ref && (i < 0 || ref.slice(0, i).includes('/'))) return { provider: 'openrouter', model: ref };
+  throw new ProviderError('bad_model', `Invalid model reference "${ref}"`);
 }
 
-/** Merge settings pushed from the browser onto the defaults, keeping only well-typed values. */
-export function mergeAppSettings(raw: any): AppSettings {
-  const s = (v: unknown, max = 500) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
-  const out: AppSettings = structuredClone(DEFAULT_APP_SETTINGS);
-  for (const p of Object.keys(PROVIDERS) as ProviderId[]) {
-    if (s(raw?.keys?.[p])) out.keys[p] = s(raw.keys[p]);
-    if (typeof raw?.baseUrls?.[p] === 'string') out.baseUrls[p] = s(raw.baseUrls[p]).replace(/\/+$/, '');
-  }
-  for (const r of ROLES) if (s(raw?.models?.[r], 200)) out.models[r] = s(raw.models[r], 200);
-  if (/^(~\/|\/)/.test(s(raw?.projectsRoot))) out.projectsRoot = s(raw.projectsRoot);
-  const max = Number(raw?.maxUsdPerDay);
-  if (Number.isFinite(max) && max >= 0) out.maxUsdPerDay = Math.min(1000, max);
-  return out;
+export function keyFor(p: ProviderId): string | undefined {
+  const env = PROVIDERS[p].env;
+  return (env && process.env[env]) || undefined;
 }
 
-/** Browser-entered key first, then the environment. */
-export function keyFor(settings: AppSettings, p: ProviderId): string | undefined {
-  const k = settings.keys[p] || (PROVIDERS[p].env ? process.env[PROVIDERS[p].env!] : undefined);
-  return k || undefined;
-}
+type BaseUrls = Partial<Record<ProviderId, string>>;
 
-export function keySource(settings: AppSettings, p: ProviderId): 'browser' | 'env' | null {
-  if (settings.keys[p]) return 'browser';
-  if (PROVIDERS[p].env && process.env[PROVIDERS[p].env!]) return 'env';
-  return null;
-}
-
-function baseFor(settings: AppSettings, p: ProviderId) {
-  return (settings.baseUrls[p] || PROVIDERS[p].base || '').replace(/\/+$/, '');
+function baseFor(p: ProviderId, baseUrls: BaseUrls) {
+  return (baseUrls[p] ?? PROVIDERS[p].base ?? '').replace(/\/+$/, '');
 }
 
 export class ProviderError extends Error {
@@ -123,11 +74,37 @@ export type ChatRequest = {
   schema: object;
   temperature: number;
   maxTokens?: number;
+  onUsage?: (usage: Usage) => void;
+  boardId?: number;
+  role?: Role;
   /** OpenRouter plugins, e.g. [{ id: 'web', engine: 'native' }] for live search. */
   plugins?: object[];
 };
 /** citations: URLs the search engine itself returned (not what the model wrote). costUsd: 0 when the provider does not report it. */
+export type Usage = { inputTokens: number; outputTokens: number; costUsd: number };
 export type ChatResult = { value: any; costUsd: number; citations?: string[] };
+export type ChatAttempt = { model: string; boardId: number | null; role: Role } & Usage;
+
+const tokens = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : 0;
+const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+
+const FLASH_PRICES: Record<string, [miss: number, hit: number, output: number]> = {
+  'deepseek:deepseek-flash': [0.30, 0.006, 1.20],
+  'zai:glm-5.3-flash': [0.15, 0.03, 0.50],
+};
+
+function chatUsage(provider: ProviderId, model: string, usage: any): Usage {
+  const hits = tokens(usage?.prompt_cache_hit_tokens ?? usage?.prompt_tokens_details?.cached_tokens);
+  const inputTokens = tokens(usage?.prompt_tokens) || hits + tokens(usage?.prompt_cache_miss_tokens);
+  const outputTokens = tokens(usage?.completion_tokens);
+  const price = FLASH_PRICES[`${provider}:${model}`];
+  const cached = Math.min(inputTokens, hits);
+  const reported = Number(usage?.cost);
+  const costUsd = price
+    ? ((inputTokens - cached) * price[0] + cached * price[1] + outputTokens * price[2]) / 1e6
+    : Number.isFinite(reported) && reported > 0 ? reported : 0;
+  return { inputTokens, outputTokens, costUsd };
+}
 export type ChatFn = (r: ChatRequest) => Promise<ChatResult>;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -148,22 +125,24 @@ export function extractJson(text: string) {
 const promptJsonRule = (schema: object) =>
   `\n\nRespond with ONLY a JSON object that matches this JSON Schema. No prose, no code fences.\n${JSON.stringify(schema)}`;
 
-async function openaiChat(settings: AppSettings, p: ProviderId, model: string, r: ChatRequest): Promise<ChatResult> {
-  const base = baseFor(settings, p);
-  if (!base) throw new ProviderError('no_base_url', `${PROVIDERS[p].label}: set a base URL in Settings`);
-  const key = keyFor(settings, p);
-  if (PROVIDERS[p].needsKey && !key) throw new ProviderError('no_key', `${PROVIDERS[p].label}: no API key (Settings → Providers)`);
+async function openaiChat(p: ProviderId, model: string, r: ChatRequest, baseUrls: BaseUrls, record: (usage: Usage) => void): Promise<ChatResult> {
+  const base = baseFor(p, baseUrls);
+  const key = keyFor(p);
+  if (!key) throw new ProviderError('no_key', `Set ${PROVIDERS[p].env} to use ${PROVIDERS[p].label}`);
   if (r.plugins && !PROVIDERS[p].search) throw new ProviderError('no_search', `${PROVIDERS[p].label} cannot search the web; use an OpenRouter model such as openrouter:x-ai/grok-4.3`);
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (key) {
-    if (p === 'azure') headers['api-key'] = key;
-    else headers.Authorization = `Bearer ${key}`;
-  }
+  headers.Authorization = `Bearer ${key}`;
   if (p === 'openrouter') Object.assign(headers, { 'HTTP-Referer': 'http://localhost:8300', 'X-Title': 'Idea Generator 2' });
 
-  let jsonMode: 'schema' | 'prompt' = p === 'mlx' ? 'prompt' : 'schema';
+  const flash = p === 'deepseek' || p === 'zai';
+  let jsonMode: 'schema' | 'object' | 'prompt' = 'schema';
   const body: any = { model, temperature: r.temperature, max_tokens: r.maxTokens ?? 1200 };
+  if (p === 'zai') {
+    body.reasoning_effort = 'low';
+    body.max_tokens = Math.max(body.max_tokens, 4000);
+  }
+  if (p === 'deepseek') body.reasoning_effort = 'none';
   if (p === 'openrouter') {
     body.reasoning = { enabled: false };
     body.usage = { include: true };
@@ -172,16 +151,29 @@ async function openaiChat(settings: AppSettings, p: ProviderId, model: string, r
   let lastError = '';
   for (let attempt = 0, adjustments = 0; attempt < 3; ) {
     body.messages = [
-      { role: 'system', content: r.system + (jsonMode === 'prompt' ? promptJsonRule(r.schema) : '') },
+      { role: 'system', content: r.system + (jsonMode !== 'schema' ? promptJsonRule(r.schema) : '') },
       { role: 'user', content: r.user },
     ];
     if (jsonMode === 'schema') body.response_format = { type: 'json_schema', json_schema: { name: r.schemaName, strict: true, schema: r.schema } };
+    else if (jsonMode === 'object') body.response_format = { type: 'json_object' };
     else delete body.response_format;
 
-    const res = await fetch(`${base}/chat/completions`, {
-      method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(r.plugins ? 150_000 : 120_000),
-    });
-    const text = await res.text();
+    let res: Response;
+    let text: string;
+    try {
+      res = await fetch(`${base}/chat/completions`, {
+        method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(r.plugins ? 150_000 : 120_000),
+        redirect: 'error',
+      });
+      text = await res.text();
+    } catch (error) {
+      record(ZERO_USAGE);
+      throw error;
+    }
+    let data: any;
+    try { data = JSON.parse(text); } catch { /* reported below */ }
+    const usage = chatUsage(p, model, data?.usage);
+    record(usage);
     // Providers disagree on parameters; adapt and retry without spending an attempt.
     if (res.status === 400 && adjustments < 4) {
       adjustments++;
@@ -194,7 +186,10 @@ async function openaiChat(settings: AppSettings, p: ProviderId, model: string, r
       if (body.max_tokens && /max_tokens/i.test(text) && /max_completion_tokens/i.test(text)) {
         body.max_completion_tokens = body.max_tokens; delete body.max_tokens; continue;
       }
-      if (jsonMode === 'schema' && /response_format|json_schema|structured/i.test(text)) { jsonMode = 'prompt'; continue; }
+      if (jsonMode === 'schema' && (flash ? /response_format/i : /response_format|json_schema|structured/i).test(text)) {
+        jsonMode = flash ? 'object' : 'prompt';
+        continue;
+      }
     }
     attempt++;
     if (!res.ok) {
@@ -203,8 +198,7 @@ async function openaiChat(settings: AppSettings, p: ProviderId, model: string, r
       if (res.status === 429 || res.status >= 500) { await sleep(1000 * attempt); continue; }
       throw new ProviderError('provider_error', lastError);
     }
-    let data: any;
-    try { data = JSON.parse(text); } catch { lastError = `${PROVIDERS[p].label}: not JSON: ${text.slice(0, 120)}`; continue; }
+    if (!data) { lastError = `${PROVIDERS[p].label}: invalid JSON response`; continue; }
     const message = data.choices?.[0]?.message ?? {};
     const content: string | undefined = message.content;
     const citations: string[] = (message.annotations ?? [])
@@ -212,58 +206,32 @@ async function openaiChat(settings: AppSettings, p: ProviderId, model: string, r
       .map((a: any) => a.url_citation.url);
     if (!content) { lastError = `Empty answer from ${model}`; continue; }
     try {
-      return { value: extractJson(content), costUsd: Number(data.usage?.cost) || 0, citations };
+      return { value: extractJson(content), costUsd: usage.costUsd, citations };
     } catch (e: any) {
       lastError = e.message;
-      if (jsonMode === 'schema') jsonMode = 'prompt';
+      if (!flash && jsonMode === 'schema') jsonMode = 'prompt';
     }
   }
   throw new ProviderError('provider_error', lastError || `${PROVIDERS[p].label} failed`);
 }
 
-async function ollamaChat(settings: AppSettings, model: string, r: ChatRequest): Promise<ChatResult> {
-  if (r.plugins) throw new ProviderError('no_search', 'Ollama cannot search the web; use an OpenRouter model for the X scout');
-  const base = baseFor(settings, 'ollama');
-  // Native API: think:false stops reasoning models (qwen3) spending every token on thinking,
-  // and format takes the JSON Schema directly. (Measured: qwen3:8b ~14 s, valid JSON.)
-  const body: any = {
-    model, stream: false, think: false, format: r.schema,
-    options: { temperature: r.temperature, num_predict: r.maxTokens ?? 1200 },
-    messages: [{ role: 'system', content: r.system }, { role: 'user', content: r.user }],
-  };
-  for (let attempt = 0; attempt < 3; attempt++) {
-    let res: Response;
-    try {
-      res = await fetch(`${base}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(300_000) });
-    } catch (e: any) {
-      throw new ProviderError('unreachable', `Ollama at ${base} is not reachable (${e?.cause?.code ?? e.message}). Is it running?`);
-    }
-    const text = await res.text();
-    if (res.status === 400 && 'think' in body && /think/i.test(text)) { delete body.think; continue; }
-    if (!res.ok) throw new ProviderError('provider_error', `Ollama ${res.status}: ${text.slice(0, 300)}`);
-    try {
-      return { value: extractJson(JSON.parse(text).message?.content ?? ''), costUsd: 0 };
-    } catch (e: any) {
-      if (attempt === 2) throw new ProviderError('provider_error', `Ollama ${model}: ${e.message}`);
-    }
-  }
-  throw new ProviderError('provider_error', `Ollama ${model} failed`);
-}
-
 const anthropicClients = new Map<string, Anthropic>();
 function anthropicClient(key: string | undefined) {
   const id = key ?? '(default)';
-  if (!anthropicClients.has(id)) anthropicClients.set(id, key ? new Anthropic({ apiKey: key }) : new Anthropic());
+  if (!anthropicClients.has(id)) anthropicClients.set(id, key ? new Anthropic({ apiKey: key, maxRetries: 0 }) : new Anthropic({ maxRetries: 0 }));
   return anthropicClients.get(id)!;
 }
 
-async function anthropicChat(settings: AppSettings, model: string, r: ChatRequest): Promise<ChatResult> {
+async function anthropicChat(model: string, r: ChatRequest, record: (usage: Usage) => void): Promise<ChatResult> {
   if (r.plugins) throw new ProviderError('no_search', 'The X scout needs OpenRouter (Grok with X search)');
-  const client = anthropicClient(keyFor(settings, 'anthropic'));
+  const key = keyFor('anthropic');
+  if (!key) throw new ProviderError('no_key', 'Set ANTHROPIC_API_KEY to use Anthropic');
+  const client = anthropicClient(key);
   // Structured output via output_config.format. No temperature: current models reject
   // non-default sampling. Low effort: these are short, single-shot answers.
   const output_config: any = { format: { type: 'json_schema', schema: r.schema }, effort: 'low' };
   for (let attempt = 0; attempt < 2; attempt++) {
+    let received = false;
     try {
       const msg = await client.messages.create({
         model,
@@ -272,12 +240,17 @@ async function anthropicChat(settings: AppSettings, model: string, r: ChatReques
         messages: [{ role: 'user', content: r.user }],
         output_config,
       } as any);
+      received = true;
+      const inputTokens = msg.usage.input_tokens + (msg.usage.cache_creation_input_tokens ?? 0) + (msg.usage.cache_read_input_tokens ?? 0);
+      const outputTokens = msg.usage.output_tokens;
+      const [pin, pout] = ANTHROPIC_PRICES[model] ?? [0, 0];
+      const costUsd = (inputTokens * pin + outputTokens * pout) / 1e6;
+      record({ inputTokens, outputTokens, costUsd });
       if (msg.stop_reason === 'refusal') throw new ProviderError('refused', `${model} declined to answer`);
       const text = msg.content.map((b: any) => (b.type === 'text' ? b.text : '')).join('');
-      const [pin, pout] = ANTHROPIC_PRICES[model] ?? [0, 0];
-      const costUsd = (msg.usage.input_tokens * pin + msg.usage.output_tokens * pout) / 1e6;
       return { value: extractJson(text), costUsd };
     } catch (e) {
+      if (!received) record(ZERO_USAGE);
       // Older models (e.g. Haiku 4.5) do not take effort: drop it once and retry.
       if (e instanceof Anthropic.BadRequestError && 'effort' in output_config && /effort/i.test(e.message)) {
         delete output_config.effort;
@@ -292,22 +265,26 @@ async function anthropicChat(settings: AppSettings, model: string, r: ChatReques
 }
 
 /** A chat function that routes every request by its "provider:model" string. */
-export function makeChat(getSettings: () => AppSettings): ChatFn {
+export function makeChat({ baseUrls = {}, log }: { baseUrls?: BaseUrls; log?: (attempt: ChatAttempt) => void } = {}): ChatFn {
   return async (r) => {
-    const settings = getSettings();
     const { provider, model } = parseModel(r.model);
-    if (!model) throw new ProviderError('bad_model', `No model given in "${r.model}"`);
-    const def = PROVIDERS[provider];
-    if (def.type === 'anthropic') return anthropicChat(settings, model, r);
-    if (def.type === 'ollama') return ollamaChat(settings, model, r);
-    return openaiChat(settings, provider, model, r);
+    let costUsd = 0;
+    const record = (usage: Usage) => {
+      costUsd += usage.costUsd;
+      r.onUsage?.(usage);
+      if (r.role) log?.({ model: `${provider}:${model}`, boardId: r.boardId ?? null, role: r.role, ...usage });
+    };
+    const out = provider === 'anthropic'
+      ? await anthropicChat(model, r, record)
+      : await openaiChat(provider, model, r, baseUrls, record);
+    return { ...out, costUsd };
   };
 }
 
 /** List a provider's models, also used as a connection test. */
-export async function listModels(settings: AppSettings, p: ProviderId): Promise<string[]> {
-  const base = baseFor(settings, p);
-  const key = keyFor(settings, p);
+export async function listModels(p: ProviderId, baseUrls: BaseUrls = {}): Promise<string[]> {
+  const base = baseFor(p, baseUrls);
+  const key = keyFor(p);
   const get = async (url: string, headers: Record<string, string> = {}) => {
     const res = await fetch(url, { headers: { Accept: 'application/json', ...headers }, signal: AbortSignal.timeout(10_000) });
     const text = await res.text();
@@ -319,15 +296,13 @@ export async function listModels(settings: AppSettings, p: ProviderId): Promise<
     }
   };
   try {
+    if (!key) throw new ProviderError('no_key', `Set ${PROVIDERS[p].env}`);
     if (p === 'anthropic') {
       const out: string[] = [];
       for await (const m of anthropicClient(key).models.list()) out.push(m.id);
       return out;
     }
-    if (p === 'ollama') return ((await get(`${base}/api/tags`)).models ?? []).map((m: any) => m.name);
-    if (!base) throw new ProviderError('no_base_url', 'Set a base URL first');
-    if (PROVIDERS[p].needsKey && !key) throw new ProviderError('no_key', 'No API key');
-    const headers: Record<string, string> = key ? (p === 'azure' ? { 'api-key': key } : { Authorization: `Bearer ${key}` }) : {};
+    const headers = { Authorization: `Bearer ${key}` };
     return ((await get(`${base}/models`, headers)).data ?? []).map((m: any) => m.id).sort();
   } catch (e: any) {
     if (e instanceof ProviderError) throw e;

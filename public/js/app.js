@@ -2,26 +2,20 @@
 
 import { api, follow } from './api.js';
 import { $, h, clear, toast, debounce } from './dom.js';
-import { t, getLang, setLang, applyI18n, errorText } from './i18n.js';
+import { t, applyI18n, errorText } from './i18n.js';
 import { Graph, KIND_COLORS } from './graph.js';
-import { loadSettings, saveSettings, pushSettings, ROLES, PROVIDER_IDS, providersInUse, DEFAULTS } from './settings.js';
+import { loadSettings, saveSettings, ROLES, providersInUse } from './settings.js';
 import { medal, scoreSum, fitness, CRITERIA } from './score.js';
 import { evolutionStats } from './evolve.js';
-import { openDashboard } from './dashboard.js';
 import { openReport } from './report.js';
 
 const MEDAL_ICON = ['–', '🥉', '🥈', '🥇'];
 const S = {
   boards: [], board: null, ideas: new Map(), edges: [], leads: [], spinoffs: [], judging: new Set(),
   autopilot: { state: 'manual' }, spentToday: 0, selected: null, templates: [], providers: null,
-  settings: loadSettings(), stopFollow: null, createAt: null, leadsTab: 'x', refreshing: {}, exhibit: false,
+  settings: null, stopFollow: null, createAt: null, leadsTab: 'research', refreshing: {},
 };
 const fail = (e) => toast(errorText(e), 'error', 8000);
-/** Built-in template names are bilingual ("Uppfinnaren · Inventor"); show the half that matches the UI. */
-const localName = (name) => {
-  const m = /^(.+?) · (.+)$/.exec(name);
-  return m ? (getLang() === 'en' ? m[2] : m[1]) : name;
-};
 const ideaList = () => [...S.ideas.values()];
 
 // ================================================================ canvas
@@ -34,7 +28,7 @@ const graph = new Graph($('#canvas'), {
   },
   hover(id, e) {
     const card = $('#hovercard');
-    if (id == null || S.exhibit) return card.classList.remove('show');
+    if (id == null) return card.classList.remove('show');
     const idea = S.ideas.get(id);
     if (!idea) return;
     const sum = scoreSum(idea);
@@ -101,8 +95,6 @@ function onEvent(e) {
     case 'hello':
       S.autopilot = e.autopilot;
       renderAutopilot();
-      // The server restarted and lost the settings it only keeps in memory: hand them over again.
-      if (!e.settingsReceived) pushSettings(S.settings).then((p) => (S.providers = p)).catch(fail);
       break;
     case 'ideas':
       for (const idea of e.ideas) {
@@ -285,8 +277,6 @@ function renderHeader() {
   btn.textContent = auto ? t('auto') : t('manual');
   btn.classList.toggle('on', auto);
   btn.setAttribute('aria-pressed', String(auto));
-  $('#ex-title').textContent = b.title;
-  $('#ex-goal').textContent = b.goal;
   renderAutopilot();
 }
 
@@ -299,12 +289,11 @@ function renderAutopilot() {
     return;
   }
   const secs = st.until ? Math.max(0, Math.ceil((st.until - Date.now()) / 1000)) : 0;
-  const time = st.until ? new Date(st.until).toLocaleTimeString(getLang() === 'sv' ? 'sv-SE' : 'en-GB', { hour: '2-digit', minute: '2-digit' }) : '';
+  const time = st.until ? new Date(st.until).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '';
   const key = st.state === 'idle' ? (st.last === 'empty' ? 'ap_idle_empty' : st.last === 'nothing_to_do' ? 'ap_idle_nothing' : 'ap_idle') : `ap_${st.state}`;
   chip.textContent = t(key, { s: `${secs} s`, time, m: st.message ?? '' });
   chip.title = t('apMeta', { n: st.stepsLastHour ?? 0, usd: (st.spentToday ?? S.spentToday ?? 0).toFixed(3) });
   chip.className = `ap-chip ${['error', 'backoff', 'board_budget', 'global_budget', 'hourly'].includes(st.state) ? 'warn' : st.state === 'running' ? 'busy' : ''}`;
-  $('#ex-status').textContent = chip.textContent;
 }
 setInterval(() => S.autopilot?.until && renderAutopilot(), 1000);
 
@@ -334,7 +323,6 @@ function renderPanelSoon() {
   requestAnimationFrame(() => {
     panelQueued = false;
     renderPanel();
-    if (S.exhibit) renderExhibit();
   });
 }
 
@@ -393,15 +381,12 @@ function renderIdea(idea) {
       kindTag(idea),
       h('span', { class: 'muted' }, t('generation', { n: idea.generation })),
     ),
-    idea.kind === 'guest' && idea.originBoardId
-      ? h('button', { class: 'linkish', onclick: () => openBoard(idea.originBoardId) }, `↗ ${t('fromBoard', { b: idea.originBoardTitle ?? '?' })}`)
-      : null,
     h('h2', {}, idea.title),
     idea.pitch ? h('p', { class: 'pitch' }, idea.pitch) : null,
     idea.sourceUrl ? h('a', { class: 'source', href: idea.sourceUrl, target: '_blank', rel: 'noopener noreferrer' }, `${t('source')} ↗`) : null,
     scoreBlock(idea),
     idea.keywords?.length
-      ? h('div', { class: 'chips' }, idea.keywords.map((k) => h('button', { class: 'chip', onclick: () => openDashboard({ keyword: k, onOpenIdea }) }, k)))
+      ? h('div', { class: 'chips' }, idea.keywords.map((k) => h('span', { class: 'chip' }, k)))
       : null,
     h('div', { class: 'seg-row', role: 'group', 'aria-label': t('medal') },
       h('span', { class: 'muted' }, t('medal')),
@@ -411,7 +396,6 @@ function renderIdea(idea) {
       h('button', { class: 'btn primary', title: t('expandHint'), onclick: () => expand(idea.id) }, `＋ ${t('expand')}`),
       h('button', { class: 'btn', onclick: () => { graph.setPick(idea.id); toast(t('combinePick')); } }, `⚡ ${t('combineWith')}`),
       h('button', { class: 'btn', onclick: () => rejudge(idea.id) }, t('rejudge')),
-      h('button', { class: 'btn', title: t('announceHint'), onclick: () => announceDialog(idea) }, `📣 ${t('announce')}`),
       h('button', { class: 'btn', title: t('spinoffHint'), onclick: () => spinoff(idea) }, `⤴ ${t('spinoff')}`),
     ),
     h('div', { class: 'project' },
@@ -542,13 +526,15 @@ async function summarize(btn) {
 function renderLeads() {
   const root = $('#leads-panel');
   if (!S.board || root.hidden) return;
+  const xConfigured = Boolean(S.board.config.models.x || S.settings?.models.x);
+  if (!xConfigured) S.leadsTab = 'research';
   const src = S.leadsTab;
   const cfg = S.board.config.researchers[src];
   const busy = S.refreshing[src];
   const list = S.leads.filter((l) => l.source === src);
   const tab = (id, label) => h('button', { class: `tab ${src === id ? 'on' : ''}`, role: 'tab', 'aria-selected': String(src === id), onclick: () => { S.leadsTab = id; renderLeads(); } }, label);
   clear(root,
-    h('div', { class: 'tabs', role: 'tablist' }, tab('x', t('leadsX')), tab('research', t('leadsResearch'))),
+    h('div', { class: 'tabs', role: 'tablist' }, xConfigured ? tab('x', t('leadsX')) : null, tab('research', t('leadsResearch'))),
     !cfg.enabled
       ? h('p', { class: 'muted' }, t('researcherOff'))
       : [
@@ -600,7 +586,7 @@ async function newBoardDialog(first = false) {
   if (!S.templates.length) S.templates = (await api('GET', '/api/templates')).templates;
   const title = h('input', { required: true, placeholder: t('newBoard') });
   const goal = h('textarea', { rows: 3, placeholder: t('goalPlaceholder') });
-  const tpl = h('select', {}, S.templates.map((x) => h('option', { value: x.id }, localName(x.name))));
+  const tpl = h('select', {}, S.templates.map((x) => h('option', { value: x.id }, x.name)));
   const dlg = dialog('dlg', t('newBoard'), [
     first ? h('p', {}, t('firstRun')) : null,
     field(t('title'), title), field(t('goal'), goal), field(t('template'), tpl),
@@ -611,7 +597,7 @@ async function newBoardDialog(first = false) {
       onclick: async (e) => {
         e.preventDefault();
         try {
-          const { board } = await api('POST', '/api/boards', { title: title.value, goal: goal.value, templateId: Number(tpl.value), lang: getLang() });
+          const { board } = await api('POST', '/api/boards', { title: title.value, goal: goal.value, templateId: Number(tpl.value) });
           dlg.close();
           await loadBoards();
           await openBoard(board.id);
@@ -629,9 +615,8 @@ async function boardSettingsDialog() {
   const inp = (value, props = {}) => h('input', { value, ...props });
   const area = (value, rows = 3, props = {}) => h('textarea', { rows, ...props }, value);
   const title = inp(b.title), goal = area(b.goal, 2, { placeholder: t('goalPlaceholder') });
-  const lang = h('select', {}, h('option', { value: 'sv', selected: c.lang === 'sv' }, 'Svenska'), h('option', { value: 'en', selected: c.lang === 'en' }, 'English'));
   const flowName = inp(c.flowName), sys = area(c.flow.system, 3), exp = area(c.flow.expand, 3), comb = area(c.flow.combine, 3);
-  const tplSel = h('select', {}, S.templates.map((x) => h('option', { value: x.id }, localName(x.name))));
+  const tplSel = h('select', {}, S.templates.map((x) => h('option', { value: x.id }, x.name)));
   const guidance = area(c.judgeGuidance, 2, { placeholder: t('judgeGuidancePh') });
   const autoProj = h('input', { type: 'checkbox', checked: c.autoProjectOnGold });
   const xOn = h('input', { type: 'checkbox', checked: c.researchers.x.enabled }), xFocus = inp(c.researchers.x.focus, { placeholder: t('focusPh') });
@@ -643,7 +628,7 @@ async function boardSettingsDialog() {
   const models = Object.fromEntries(ROLES.map((r) => [r, inp(c.models?.[r] ?? '', { placeholder: S.settings.models[r], list: 'model-list' })]));
 
   const dlg = dialog('dlg', t('boardSettings'), [
-    h('fieldset', {}, h('legend', {}, t('general')), field(t('title'), title), field(t('goal'), goal), field(t('language'), lang)),
+    h('fieldset', {}, h('legend', {}, t('general')), field(t('title'), title), field(t('goal'), goal)),
     h('fieldset', {}, h('legend', {}, t('flow')),
       h('div', { class: 'row' }, tplSel, h('button', {
         class: 'btn small', type: 'button',
@@ -697,7 +682,7 @@ async function boardSettingsDialog() {
         const board = await patchBoard({
           title: title.value, goal: goal.value,
           config: {
-            lang: lang.value, flowName: flowName.value, flow: { system: sys.value, expand: exp.value, combine: comb.value },
+            flowName: flowName.value, flow: { system: sys.value, expand: exp.value, combine: comb.value },
             judgeGuidance: guidance.value, autoProjectOnGold: autoProj.checked,
             researchers: { x: { enabled: xOn.checked, focus: xFocus.value }, research: { enabled: rOn.checked, focus: rFocus.value } },
             mode: mode.value, autopilotSeconds: Number(pace.value), rate: { stepsPerHour: Number(sph.value), usdPerDay: Number(usd.value) },
@@ -710,12 +695,6 @@ async function boardSettingsDialog() {
   ]);
 }
 
-const PROVIDER_LABELS = {
-  openrouter: 'OpenRouter', anthropic: 'Anthropic', openai: 'OpenAI',
-  azure: 'Azure OpenAI / Microsoft Foundry (Copilot models)', ollama: 'Ollama', mlx: 'MLX (mlx_lm.server)', lmstudio: 'LM Studio', custom: 'OpenAI-compatible',
-};
-const HAS_URL = ['ollama', 'mlx', 'lmstudio', 'azure', 'custom'];
-const HAS_KEY = ['openrouter', 'anthropic', 'openai', 'azure', 'custom'];
 const modelCatalog = new Map();
 
 function refreshModelList() {
@@ -723,31 +702,23 @@ function refreshModelList() {
   clear(dl, [...modelCatalog.entries()].flatMap(([p, ids]) => ids.slice(0, 400).map((id) => h('option', { value: `${p}:${id}` }))));
 }
 
-function appSettingsDialog() {
-  const s = structuredClone(S.settings);
-  const status = new Map((S.providers?.providers ?? []).map((p) => [p.id, p]));
-  const keys = {}, urls = {};
-  const rows = PROVIDER_IDS.map((p) => {
-    const st = status.get(p);
+async function appSettingsDialog() {
+  const [settings, providers] = await Promise.all([loadSettings(), api('GET', '/api/providers')]);
+  const rows = providers.providers.map((provider) => {
     const result = h('span', { class: 'small muted' });
-    keys[p] = HAS_KEY.includes(p) ? h('input', { type: 'password', value: s.keys[p] ?? '', placeholder: t('apiKey'), autocomplete: 'off' }) : null;
-    urls[p] = HAS_URL.includes(p) ? h('input', { value: s.baseUrls[p] ?? '', placeholder: t('baseUrl') }) : null;
     return h('div', { class: 'provider' },
       h('div', { class: 'row space' },
-        h('strong', {}, PROVIDER_LABELS[p]),
-        h('span', { class: `badge ${st?.keySource ? 'ok' : st?.local ? '' : 'warn'}` },
-          st?.local ? t('local') : st?.keySource ? t(`keyFrom_${st.keySource}`) : t('keyMissing')),
+        h('strong', {}, provider.label),
+        h('span', { class: `badge ${provider.keySource ? 'ok' : 'warn'}` }, provider.keySource ? t('keyFrom_env') : t('keyMissing')),
       ),
-      st?.note ? h('small', { class: 'muted' }, st.note) : null,
-      h('div', { class: 'row' }, keys[p], urls[p],
+      h('div', { class: 'row' }, h('code', {}, provider.env),
         h('button', {
           class: 'btn small', type: 'button',
           onclick: async () => {
             result.textContent = '…';
             try {
-              await saveFromForm(false);
-              const { models } = await api('POST', `/api/providers/${p}/models`, {});
-              modelCatalog.set(p, models);
+              const { models } = await api('POST', `/api/providers/${provider.id}/models`, {});
+              modelCatalog.set(provider.id, models);
               refreshModelList();
               result.textContent = t('testOk', { n: models.length });
             } catch (e) { result.textContent = errorText(e); }
@@ -755,97 +726,42 @@ function appSettingsDialog() {
         }, t('test')), result),
     );
   });
-  const models = Object.fromEntries(ROLES.map((r) => [r, h('input', { value: s.models[r], list: 'model-list', placeholder: DEFAULTS.models[r] })]));
-  const root = h('input', { value: s.projectsRoot });
-  const budget = h('input', { type: 'number', min: 0, step: 0.5, value: s.maxUsdPerDay });
-  const spend = S.providers ? t('spend', { today: S.providers.spentToday.toFixed(3), total: S.providers.spentTotal.usd.toFixed(3) }) : '';
+  const models = Object.fromEntries(ROLES.map((role) => [role, h('input', {
+    value: settings.models[role], list: 'model-list', required: role !== 'x',
+  })]));
+  const root = h('input', { value: settings.projectsRoot, required: true });
+  const budget = h('input', { type: 'number', min: 0, max: 1000, step: 'any', value: settings.maxUsdPerDay, required: true });
+  const start = h('input', { type: 'time', value: settings.activeHours.start, required: true });
+  const end = h('input', { type: 'time', value: settings.activeHours.end, required: true });
+  const spend = t('spend', { today: providers.spentToday.toFixed(3), total: providers.spentTotal.usd.toFixed(3) });
 
-  async function saveFromForm(close = true) {
-    for (const p of PROVIDER_IDS) {
-      if (keys[p]) { if (keys[p].value.trim()) s.keys[p] = keys[p].value.trim(); else delete s.keys[p]; }
-      if (urls[p]) s.baseUrls[p] = urls[p].value.trim();
-    }
-    for (const r of ROLES) s.models[r] = models[r].value.trim() || DEFAULTS.models[r];
-    s.projectsRoot = root.value.trim() || DEFAULTS.projectsRoot;
-    s.maxUsdPerDay = Number(budget.value);
-    S.settings = s;
-    S.providers = await saveSettings(s);
-    if (close) { dlg.close(); toast(t('settingsSaved')); warnMissingKeys(); }
+  async function saveFromForm() {
+    if (!dlg.querySelector('form').reportValidity()) return;
+    S.settings = await saveSettings({
+      models: Object.fromEntries(ROLES.map((role) => [role, models[role].value.trim()])),
+      projectsRoot: root.value.trim(), maxUsdPerDay: Number(budget.value),
+      activeHours: { start: start.value, end: end.value },
+    });
+    S.providers = providers;
+    dlg.close();
+    toast(t('settingsSaved'));
+    renderLeads();
+    warnMissingKeys();
   }
 
   const dlg = dialog('dlg', t('appSettings'), [
     h('p', { class: 'small muted' }, t('settingsNote')),
     h('fieldset', {}, h('legend', {}, t('providers')), rows),
-    h('fieldset', {}, h('legend', {}, t('models')), h('div', { class: 'grid2' }, ROLES.map((r) => field(t(`role_${r}`), models[r]))),
+    h('fieldset', {}, h('legend', {}, t('models')), h('div', { class: 'grid2' }, ROLES.map((role) => field(t(`role_${role}`), models[role]))),
       h('small', { class: 'muted' }, t('calibrateNote'))),
     h('fieldset', {}, h('legend', {}, 'Claude Code'), field(t('projectsRoot'), root)),
-    h('fieldset', {}, h('legend', {}, t('autopilot')), field(t('globalBudget'), budget, spend)),
+    h('fieldset', {}, h('legend', {}, t('autopilot')), field(t('globalBudget'), budget, spend),
+      h('div', { class: 'grid2' }, field(t('activeStart'), start), field(t('activeEnd'), end))),
   ], [
-    h('button', { class: 'btn', value: 'cancel' }, t('cancel')),
+    h('button', { class: 'btn', value: 'cancel', formnovalidate: true }, t('cancel')),
     h('button', { class: 'btn primary', onclick: (e) => { e.preventDefault(); saveFromForm().catch(fail); } }, t('save')),
   ]);
 }
-
-function announceDialog(idea) {
-  const others = S.boards.filter((b) => b.id !== S.board.id);
-  const boxes = others.map((b) => ({ b, box: h('input', { type: 'checkbox' }) }));
-  const all = h('input', { type: 'checkbox', onchange: (e) => boxes.forEach((x) => (x.box.checked = e.target.checked)) });
-  const dlg = dialog('dlg', t('announceTitle', { t: idea.title }), [
-    h('p', { class: 'small muted' }, t('announceHint')),
-    others.length
-      ? [h('label', { class: 'check' }, all, h('strong', {}, t('allBoards'))), boxes.map(({ b, box }) => h('label', { class: 'check' }, box, b.title, h('span', { class: 'muted small' }, b.goal ? ` · ${b.goal}` : '')))]
-      : h('p', {}, t('noOtherBoards')),
-  ], [
-    h('button', { class: 'btn', value: 'cancel' }, t('cancel')),
-    others.length
-      ? h('button', {
-          class: 'btn primary',
-          onclick: async (e) => {
-            e.preventDefault();
-            const ids = boxes.filter((x) => x.box.checked).map((x) => x.b.id);
-            if (!ids.length) return;
-            try {
-              const r = await api('POST', `/api/ideas/${idea.id}/announce`, { boardIds: ids });
-              dlg.close();
-              toast(r.guests.length ? t('announced', { n: r.guests.length }) : t('announceNone'), r.guests.length ? 'good' : 'info');
-            } catch (err) { fail(err); }
-          },
-        }, t('announce'))
-      : null,
-  ]);
-}
-
-// ================================================================ exhibition
-
-function renderExhibit() {
-  const top = ideaList().filter((i) => fitness(i) != null).sort((a, b) => fitness(b) - fitness(a)).slice(0, 3);
-  clear($('#ex-top'), top.map((i) => h('li', {}, h('span', {}, `${medal(i) ? MEDAL_ICON[medal(i)] : ''} ${scoreSum(i) ?? ''}`), ' ', i.title)));
-}
-
-async function enterExhibit() {
-  S.exhibit = true;
-  document.body.classList.add('exhibit');
-  graph.followNewest = true;
-  graph.insets = { top: 250, right: 40, bottom: 130, left: 40 };
-  graph.select(null);
-  S.selected = null;
-  renderHeader();
-  renderExhibit();
-  try { await document.documentElement.requestFullscreen?.(); } catch { /* fullscreen is optional */ }
-  setTimeout(() => graph.fit(), 300);
-  toast(t('exhibitExit'));
-}
-
-function leaveExhibit() {
-  if (!S.exhibit) return;
-  S.exhibit = false;
-  document.body.classList.remove('exhibit');
-  graph.followNewest = false;
-  graph.insets = { top: 30, right: 30, bottom: 100, left: 30 };
-  if (document.fullscreenElement) document.exitFullscreen?.();
-  renderPanel();
-}
-document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) leaveExhibit(); });
 
 // ================================================================ misc
 
@@ -861,7 +777,7 @@ function onOpenIdea(boardId, ideaId) {
 
 async function exportBoard() {
   try {
-    const md = await api('GET', `/api/boards/${S.board.id}/export.md?lang=${getLang()}`);
+    const md = await api('GET', `/api/boards/${S.board.id}/export.md`);
     const a = h('a', { href: URL.createObjectURL(new Blob([md], { type: 'text/markdown' })), download: `${S.board.title.replace(/[^\p{L}\p{N}]+/gu, '-').toLowerCase()}.md` });
     a.click();
     URL.revokeObjectURL(a.href);
@@ -874,7 +790,7 @@ function warnMissingKeys() {
   const status = new Map((S.providers?.providers ?? []).map((p) => [p.id, p]));
   for (const p of providersInUse(S.settings)) {
     const st = status.get(p);
-    if (st && !st.local && st.needsKey && !st.keySource) toast(t('needKey', { p: st.label }), 'error', 10000);
+    if (st && !st.keySource) toast(t('needKey', { p: st.label, env: st.env }), 'error', 10000);
   }
 }
 
@@ -884,7 +800,6 @@ function renderAll() {
   renderBoardMenu();
   renderPanel();
   renderLeads();
-  $('#lang-btn').textContent = getLang() === 'sv' ? 'EN' : 'SV';
 }
 
 function wire() {
@@ -908,13 +823,10 @@ function wire() {
     $('#leads-btn').setAttribute('aria-expanded', String(!p.hidden));
     renderLeads();
   });
-  $('#dashboard-btn').addEventListener('click', () => openDashboard({ onOpenIdea }));
   $('#report-btn').addEventListener('click', () => openReport({ onOpenIdea, onOpenBoard: (id) => openBoard(id) }));
-  $('#exhibit-btn').addEventListener('click', enterExhibit);
   $('#export-btn').addEventListener('click', exportBoard);
   $('#board-settings-btn').addEventListener('click', boardSettingsDialog);
-  $('#app-settings-btn').addEventListener('click', appSettingsDialog);
-  $('#lang-btn').addEventListener('click', () => { setLang(getLang() === 'sv' ? 'en' : 'sv'); renderAll(); });
+  $('#app-settings-btn').addEventListener('click', () => appSettingsDialog().catch(fail));
   $('#zoom-in').addEventListener('click', () => graph.zoomBy(1.25));
   $('#zoom-out').addEventListener('click', () => graph.zoomBy(0.8));
   $('#fit-btn').addEventListener('click', () => graph.fit());
@@ -922,7 +834,6 @@ function wire() {
     const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName ?? '');
     if (e.key === 'Escape') {
       if (graph.pick) graph.setPick(null);
-      else if (S.exhibit) leaveExhibit();
       else if (!document.querySelector('dialog[open]')) graph.h.select(null);
     }
     if (typing) return;
@@ -935,10 +846,11 @@ async function main() {
   wire();
   applyI18n();
   try {
-    S.providers = await pushSettings(S.settings);
+    [S.settings, S.providers] = await Promise.all([loadSettings(), api('GET', '/api/providers')]);
     warnMissingKeys();
   } catch (e) {
     fail(e);
+    return;
   }
   await loadBoards();
   const last = Number(localStorage.getItem('ideagen.board'));

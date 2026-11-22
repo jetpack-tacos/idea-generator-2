@@ -9,12 +9,11 @@
 // semantic search on the goal, last 12 months). An LLM picks the six most
 // useful for the goal and writes a hook for each.
 
-import type { ChatFn, Lang } from './llm.ts';
+import type { ChatFn } from './llm.ts';
 
 export type LeadDraft = { title: string; summary: string; hook: string; url: string; meta: Record<string, unknown> };
 type Paper = { id: string; title: string; summary: string; published: string; upvotes: number };
 
-const LANG_NAME: Record<Lang, string> = { sv: 'idiomatic Swedish', en: 'English' };
 const DEFAULT_TOPIC = 'new technology, AI tools, and new ways people actually use them';
 
 const leadProps = {
@@ -68,12 +67,12 @@ export function normalizeUrl(u: string): string | null {
   }
 }
 
-export async function xLeads(a: { chat: ChatFn; model: string; goal: string; lang: Lang }) {
+export async function xLeads(a: { chat: ChatFn; model: string; goal: string }) {
   const topic = a.goal.trim() || DEFAULT_TOPIC;
   const user = [
     `Search X for posts from the last 7 days that show emerging trends, new tools, behaviours or debates relevant to this goal:\n"${topic}"`,
     'Find 6 distinct trends. Each must come from a real post you found in the search results; give that post\'s x.com URL.',
-    `Write title, summary and hook in ${LANG_NAME[a.lang]}.`,
+    'Use the goal’s language for the title, summary and hook, or English if unclear.',
   ].join('\n\n');
   const r = await a.chat({
     model: a.model,
@@ -138,7 +137,7 @@ export async function fetchPapers(goal: string, fetchFn: typeof fetch = fetch): 
   return out;
 }
 
-export async function researchLeads(a: { chat: ChatFn; model: string; goal: string; lang: Lang; papers: Paper[] }) {
+export async function researchLeads(a: { chat: ChatFn; model: string; goal: string; papers: Paper[] }) {
   if (!a.papers.length) throw new Error('Hugging Face returned no papers');
   const byId = new Map(a.papers.map((p) => [p.id, p]));
   const list = a.papers
@@ -151,7 +150,7 @@ export async function researchLeads(a: { chat: ChatFn; model: string; goal: stri
   const user = [
     `Pick the 6 papers below that could most inspire new ideas for ${aim}. Prefer recent, concrete results that make something newly possible. Skip papers that only improve a benchmark score.`,
     'For each: the id exactly as given, a plain-language title (no jargon), a summary of what the research makes possible, and a hook: one idea it could inspire for the goal.',
-    `Write title, summary and hook in ${LANG_NAME[a.lang]}.`,
+    'Use the goal’s language for the title, summary and hook, or English if unclear.',
     `Papers:\n${list}`,
   ].join('\n\n');
   const r = await a.chat({

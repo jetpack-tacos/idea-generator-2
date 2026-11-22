@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { localDay } from '../server/db.ts';
 import { fetchPapers, normalizeUrl } from '../server/leads.ts';
 import { expandHome, renderClaudeMd, slugify, writeProject, type Brief } from '../server/project.ts';
 
@@ -48,23 +49,36 @@ const idea = {
   reason: 'Bra.', medalOverride: null,
 };
 
-test('CLAUDE.md: verdict, goal, numbered steps, and lineage across boards', () => {
+test('CLAUDE.md: verdict, goal, numbered steps, and source lineage', () => {
   const md = renderClaudeMd({
-    brief, idea, goal: 'Ljud', lang: 'sv', date: '2026-11-02',
-    lineage: [{ ...idea, id: 2, title: 'Gäst', pitch: 'G', kind: 'guest', originBoardTitle: 'Ljusbordet' }],
+    brief, idea, goal: 'Ljud', date: '2026-11-02',
+    lineage: [{ ...idea, id: 2, title: 'Source seed', pitch: 'Source pitch', kind: 'seed', sourceUrl: 'https://example.com/source' }],
   });
-  assert.match(md, /Originalitet 5 · Genomförbarhet 4 · Effekt 4 = 13\/15 🥇/);
-  assert.match(md, /## Tavlans mål\n\nLjud/);
+  assert.match(md, /Use 5 · Buildable 4 · Fit 4 = 13\/15 🥇/);
+  assert.match(md, /## Board goal\n\nLjud/);
   assert.match(md, /1\. f1\n2\. f2/);
-  assert.match(md, /- Gäst \(från tavlan Ljusbordet\): \*\*Gäst\*\* G/);
+  assert.ok(md.includes("- Seed: **Source seed** Source pitch (source: https://example.com/source)"));
 });
 
-test('project folders never overwrite: a taken name gets -2', async () => {
+test('gold project files, literal Windows-safe paths and no overwrites', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'ideagen-'));
-  const a = await writeProject({ root, brief, idea, goal: '', lineage: [], lang: 'en', gitInit: false });
-  const b = await writeProject({ root, brief, idea, goal: '', lineage: [], lang: 'en', gitInit: false });
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const source = { ...idea, id: 2, title: 'TEST source', kind: 'seed', sourceUrl: 'https://example.com/seed' };
+  const input = { root, brief, idea, goal: '', lineage: [source], boardTitle: 'TEST board', gitInit: false };
+  const a = await writeProject(input);
+  writeFileSync(join(a, 'NOTES.md'), 'Existing working notes');
+  const b = await writeProject(input);
   assert.deepEqual([a, b].map((p) => p.slice(root.length + 1)), ['bank', 'bank-2']);
-  assert.deepEqual(readdirSync(a).sort(), ['.gitignore', 'CLAUDE.md', 'README.md', 'idea.json', 'vault']);
-  assert.match(readFileSync(join(a, 'README.md'), 'utf8'), new RegExp(`cd "${a}"\\nclaude`));
-  await assert.rejects(writeProject({ root: 'relative', brief, idea, goal: '', lineage: [], lang: 'en', gitInit: false }), /absolute/);
+  assert.deepEqual(readdirSync(b).sort(), ['.gitignore', 'CLAUDE.md', 'JER-ASKED.md', 'NOTES.md', 'README.md', 'idea.json', 'vault']);
+  assert.ok(readFileSync(join(a, 'README.md'), 'utf8').includes(`cd "${a}"\nclaude`));
+  assert.equal(readFileSync(join(a, 'NOTES.md'), 'utf8'), 'Existing working notes');
+  assert.equal(readFileSync(join(b, 'JER-ASKED.md'), 'utf8'),
+    `# Bänk\n\nRuns on: not decided yet\nNo requests yet: this idea came from the idea generator on ${localDay()}, board "TEST board".\n`);
+  const notes = readFileSync(join(b, 'NOTES.md'), 'utf8');
+  assert.match(notes, /Gold 🥇\nUse 5\/5 · Buildable 4\/5 · Fit 4\/5 \(13\/15\)\nBra\./);
+  assert.ok(notes.includes('https://example.com/seed'));
+  const ordinary = await writeProject({ ...input, brief: { ...brief, slug: 'con' }, idea: { ...idea, impact: 1 } });
+  assert.equal(ordinary.slice(root.length + 1), 'idea-con');
+  assert.ok(!readdirSync(ordinary).includes('JER-ASKED.md'));
+  await assert.rejects(writeProject({ ...input, root: 'relative' }), /absolute/);
 });

@@ -1,8 +1,8 @@
 // The whole HTTP API against an in-memory database and a fake LLM.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer, type Server } from 'node:http';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { createServer, request, type Server } from 'node:http';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../server/db.ts';
@@ -47,8 +47,7 @@ async function fakeChat(r: ChatRequest) {
 
 const projectsRoot = mkdtempSync(join(tmpdir(), 'ideagen-projects-'));
 let settings: AppSettings = { ...structuredClone(DEFAULT_APP_SETTINGS), projectsRoot };
-let received = false;
-const runtime = { get: () => settings, set: (s: AppSettings) => { settings = s; received = true; }, received: () => received };
+const runtime = { get: () => settings, set: (next: AppSettings) => { settings = next; } };
 
 const repo = openDb(':memory:');
 const revealed: string[] = [];
@@ -77,33 +76,41 @@ before(async () => {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as any).port}`;
 });
-after(() => server.close());
+after(async () => {
+  await engine.idle();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  repo.close();
+  rmSync(projectsRoot, { recursive: true, force: true });
+});
 
 async function api(method: string, path: string, body?: unknown) {
   const res = await fetch(base + path, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
+    headers: method !== 'GET' ? { 'Content-Type': 'application/json' } : {},
     body: body ? JSON.stringify(body) : undefined,
   });
   const type = res.headers.get('content-type') ?? '';
   return { status: res.status, data: type.includes('json') ? await res.json() : await res.text() };
 }
-const newBoard = async (extra: object = {}) => (await api('POST', '/api/boards', { lang: 'sv', ...extra })).data.board;
+const newBoard = async (extra: object = {}) => (await api('POST', '/api/boards', extra)).data.board;
 const seed = async (boardId: number, text: string) => (await api('POST', `/api/boards/${boardId}/seed`, { text })).data.idea;
 const lastCall = (schema: string) => [...calls].reverse().find((c) => c.schemaName === schema)!;
 
 test('full loop: seed → background judge → expand → combine → export', async () => {
   judgeScores = { originality: 3, feasibility: 3, impact: 3 };
   const board = await newBoard({ goal: 'Färre bilresor i staden' });
-  assert.equal(board.title, 'Ny tavla');
+  assert.equal(board.title, 'New board');
   assert.equal(board.config.mode, 'manual');
-  assert.equal(board.config.flowName, 'Uppfinnaren · Inventor', 'the first template seeds the flow');
+  assert.equal(board.config.flowName, 'Inventor', 'the first template seeds the flow');
 
   const before = calls.length;
   const s = await seed(board.id, 'Lånecyklar');
   assert.equal(s.title, 'Lånecyklar');
   await engine.idle();
   assert.equal(calls.length, before + 1, 'a short seed needs no LLM call, only the judge');
+  assert.match(lastCall('judgement').system, /USE .*\nWould someone in the household use it every week\?/);
+  assert.match(lastCall('judgement').system, /BUILDABLE[\s\S]*?one or two sessions/);
+  assert.match(lastCall('judgement').system, /FIT[\s\S]*?Android phones, Google Home/);
   assert.match(lastCall('judgement').user, /Färre bilresor i staden/, 'the judge sees the goal');
   const judged = repo.getIdea(s.id)!;
   assert.equal(judged.originality, 3);
@@ -112,6 +119,7 @@ test('full loop: seed → background judge → expand → combine → export', a
   const { data: e } = await api('POST', `/api/ideas/${s.id}/expand`, {});
   assert.equal(e.ideas.length, 3);
   assert.match(e.ideas[0].title, /^Barn \d+\.1$/, 'quotes and trailing period are stripped');
+  assert.match(lastCall('expand').user, /language of the source ideas or seed text/);
   assert.match(lastCall('expand').user, /Every idea must serve this goal/);
   assert.match(lastCall('expand').user, /- Lånecyklar/, 'existing titles reach the prompt');
   await engine.idle();
@@ -125,10 +133,11 @@ test('full loop: seed → background judge → expand → combine → export', a
   const { data: j } = await api('POST', `/api/ideas/${c.idea.id}/judge`, {});
   assert.deepEqual([j.idea.originality, j.idea.feasibility, j.idea.impact], [5, 1, 4], 'scores are clamped');
 
-  const { data: md } = await api('GET', `/api/boards/${board.id}/export.md?lang=sv`);
-  assert.match(md, /^# Ny tavla/);
+  const { data: md } = await api('GET', `/api/boards/${board.id}/export.md`);
+  assert.match(md, /^# New board/);
   assert.match(md, /> Färre bilresor i staden/);
   assert.match(md, /## 🥉 Korsning — 10\/15/, '10/15 is bronze');
+  assert.match(md, /Use 5 · Buildable 1 · Fit 4/);
   assert.match(md, /`public space` `sound`/);
   assert.ok(repo.spentOn(board.id) > 0, 'spend lands on the board');
   judgeScores = { originality: 3, feasibility: 3, impact: 3 };
@@ -136,23 +145,22 @@ test('full loop: seed → background judge → expand → combine → export', a
 
 test('each role uses its own model: app-wide setting, overridden per board', async () => {
   const pushed = await api('PUT', '/api/runtime-settings', {
-    ...settings, models: { ...settings.models, expand: 'ollama:qwen3:8b' }, keys: { openrouter: 'sk-or-secret-123' },
+    ...settings, models: { ...settings.models, expand: 'zai:glm-5.3-flash' }, keys: { openrouter: 'sk-or-secret-123' },
   });
   assert.ok(!JSON.stringify(pushed.data).includes('sk-or-secret-123'), 'keys are never echoed back');
-  assert.equal(pushed.data.providers.find((p: any) => p.id === 'openrouter').keySource, 'browser');
-  assert.equal(pushed.data.settingsReceived, true);
+  assert.equal((await api('GET', '/api/runtime-settings')).data.models.expand, 'zai:glm-5.3-flash');
 
   const board = await newBoard();
   const s = await seed(board.id, 'Rot');
   await api('POST', `/api/ideas/${s.id}/expand`, {});
-  assert.equal(lastCall('expand').model, 'ollama:qwen3:8b');
+  assert.equal(lastCall('expand').model, 'zai:glm-5.3-flash');
 
   await api('PATCH', `/api/boards/${board.id}`, { config: { models: { expand: 'anthropic:claude-opus-5-5' } } });
   await api('POST', `/api/ideas/${s.id}/expand`, {});
   assert.equal(lastCall('expand').model, 'anthropic:claude-opus-5-5', 'board override wins');
   await api('PATCH', `/api/boards/${board.id}`, { config: { models: { expand: '' } } });
   await api('POST', `/api/ideas/${s.id}/expand`, {});
-  assert.equal(lastCall('expand').model, 'ollama:qwen3:8b', 'an empty override falls back to the app setting');
+  assert.equal(lastCall('expand').model, 'zai:glm-5.3-flash', 'an empty override falls back to the app setting');
   await engine.idle();
   settings = { ...structuredClone(DEFAULT_APP_SETTINGS), projectsRoot };
 });
@@ -168,7 +176,7 @@ test('board config is validated and clamped', async () => {
   assert.equal(c.rate.usdPerDay, 0);
   assert.equal(c.autopilotSeconds, 3);
   assert.ok(c.flow.system.length > 20, 'an empty prompt keeps the old one');
-  assert.equal(c.lang, 'sv');
+  assert.equal(c.lang, undefined);
 });
 
 test('the judge turns gold into a Claude Code project; a board can switch that off', async () => {
@@ -197,37 +205,13 @@ test('the judge turns gold into a Claude Code project; a board can switch that o
   const s2 = await seed(off.id, 'Ännu en guldidé');
   await engine.idle();
   assert.equal(repo.getIdea(s2.id)!.projectPath, null);
+  const briefCallsBefore = calls.filter((call) => call.schemaName === 'brief').length;
+  const createProject = () => api('POST', `/api/ideas/${s2.id}/project`, {});
+  const [first, second] = await Promise.all([createProject(), createProject()]);
+  assert.equal(first.status, 200);
+  assert.equal(second.data.path, first.data.path, 'overlapping requests share one project');
+  assert.equal(calls.filter((call) => call.schemaName === 'brief').length, briefCallsBefore + 1);
   judgeScores = { originality: 3, feasibility: 3, impact: 3 };
-});
-
-test('announce: guests cross-breed on other boards, judged against their goals', async () => {
-  const a = await newBoard({ title: 'Ljud', goal: 'Ljudkonst' });
-  const b = await newBoard({ title: 'Trafik', goal: 'Färre bilar' });
-  const c = await newBoard({ title: 'Mat', goal: 'Mindre matsvinn' });
-  const idea = await seed(a.id, 'Visslande trafikljus');
-  await engine.idle();
-
-  const { data } = await api('POST', `/api/ideas/${idea.id}/announce`, { boardIds: [a.id, b.id, c.id, b.id] });
-  assert.deepEqual(data.guests.map((g: any) => g.boardId).sort(), [b.id, c.id].sort(), 'not to its own board, once per board');
-  const guest = data.guests.find((g: any) => g.boardId === b.id).idea;
-  assert.equal(guest.kind, 'guest');
-  assert.equal(guest.originBoardTitle, 'Ljud');
-  await engine.idle();
-  const guestJudge = calls.filter((x) => x.schemaName === 'judgement' && x.user.includes('Visslande trafikljus'));
-  assert.ok(guestJudge.some((x) => x.user.includes('Färre bilar')), "judged against the target board's goal");
-
-  const again = await api('POST', `/api/ideas/${idea.id}/announce`, { boardIds: 'all' });
-  assert.ok(!again.data.guests.some((g: any) => [b.id, c.id].includes(g.boardId)), 'never twice on the same board');
-  assert.ok([b.id, c.id].every((id) => again.data.skipped.includes(id)));
-  const onward = await api('POST', `/api/ideas/${guest.id}/announce`, { boardIds: [a.id] });
-  assert.equal(onward.data.guests.length, 0, 'a guest cannot be announced back to its original board');
-
-  const local = await seed(b.id, 'Cykelfiler');
-  const { data: child } = await api('POST', `/api/boards/${b.id}/combine`, { a: guest.id, b: local.id });
-  const lineage = repo.lineage(child.idea.id);
-  assert.ok(lineage.some((i) => i.title === 'Visslande trafikljus') && lineage.some((i) => i.title === 'Cykelfiler'));
-  assert.ok(lineage.some((i) => i.boardId === a.id), 'lineage follows the guest home');
-  await engine.idle();
 });
 
 test('spin-off: a new board grown from one idea, refined in its own context', async () => {
@@ -248,6 +232,8 @@ test('spin-off: a new board grown from one idea, refined in its own context', as
 
 test('leads: X keeps only search-cited posts; research keeps only real paper ids', async () => {
   const board = await newBoard({ goal: 'Interaktivt ljus' });
+  assert.equal((await api('POST', `/api/boards/${board.id}/leads/x`, {})).data.code, 'scout_disabled');
+  await api('PATCH', `/api/boards/${board.id}`, { config: { models: { x: 'openrouter:x-ai/grok-4.3' } } });
   xCitations = ['https://x.com/a/status/1', 'https://x.com/b/status/2'];
   const { data: x } = await api('POST', `/api/boards/${board.id}/leads/x`, {});
   assert.deepEqual(x.leads.map((l: any) => l.title), ['Trend A', 'Trend B']);
@@ -280,26 +266,7 @@ test('summary of a board, kept on the board and in the export', async () => {
   assert.equal(data.board.summary.headline, 'Tavlan rör sig mot ljud.');
   assert.equal(data.board.summary.ideaCount, 2);
   const { data: md } = await api('GET', `/api/boards/${board.id}/export.md`);
-  assert.match(md, /## Sammanfattning\n\nTavlan rör sig mot ljud\./);
-});
-
-test('dashboard: keyword trends across boards, and drill-down', async () => {
-  judgeKeywords = ['Trend Keyword'];
-  const b1 = await newBoard({ title: 'D1' });
-  const b2 = await newBoard({ title: 'D2' });
-  await seed(b1.id, 'Ett');
-  await seed(b2.id, 'Två');
-  await engine.idle();
-  const { data } = await api('GET', '/api/dashboard?days=7');
-  const kw = data.keywords.find((k: any) => k.keyword === 'trend keyword');
-  assert.equal(kw.count, 2);
-  assert.equal(kw.boards, 2);
-  assert.equal(kw.recent, 2);
-  assert.equal(kw.series.length, 7);
-  assert.equal(kw.series.at(-1), 2, 'today');
-  const { data: drill } = await api('GET', `/api/keywords/${encodeURIComponent('trend keyword')}/ideas`);
-  assert.deepEqual(drill.ideas.map((i: any) => i.boardTitle).sort(), ['D1', 'D2']);
-  judgeKeywords = ['public space', 'sound'];
+  assert.match(md, /## Summary\n\nTavlan rör sig mot ljud\./);
 });
 
 test('live events: a browser following a board sees what happens', async () => {
@@ -344,6 +311,23 @@ test('provider failures surface with their code, and nothing is half-saved', asy
   assert.equal(repo.listIdeas(board.id).length, 1);
 });
 
+test('invalid jury output leaves the last valid score intact', async () => {
+  const board = await newBoard();
+  const idea = await seed(board.id, 'TEST verdict validation');
+  await engine.idle();
+  const before = repo.getIdea(idea.id);
+  const scores = judgeScores;
+  try {
+    judgeScores = { originality: NaN, feasibility: 5, impact: 5 };
+    const result = await api('POST', `/api/ideas/${idea.id}/judge`, {});
+    assert.equal(result.status, 502);
+    assert.match(result.data.error, /numeric scores/);
+    assert.deepEqual(repo.getIdea(idea.id), before);
+  } finally {
+    judgeScores = scores;
+  }
+});
+
 test('links: fetched and distilled; unreadable links are an error, not a silent text seed', async () => {
   const board = await newBoard();
   const ok = await api('POST', `/api/boards/${board.id}/seed`, { text: 'https://example.com/artikel' });
@@ -354,9 +338,9 @@ test('links: fetched and distilled; unreadable links are an error, not a silent 
   assert.equal(repo.listIdeas(board.id).length, 1);
 });
 
-test('templates: four defaults, editable, the last one stays', async () => {
+test('templates: three defaults, editable, the last one stays', async () => {
   const { data } = await api('GET', '/api/templates');
-  assert.equal(data.templates.length, 4);
+  assert.equal(data.templates.length, 3);
   assert.equal((await api('POST', '/api/templates', { name: 'X' })).status, 400);
   const { data: n } = await api('POST', '/api/templates', { name: 'Ny', system: 's', expand: 'e', combine: 'c' });
   const board = await newBoard({ templateId: n.template.id });
@@ -364,6 +348,15 @@ test('templates: four defaults, editable, the last one stays', async () => {
   const all = (await api('GET', '/api/templates')).data.templates;
   for (const t of all.slice(0, -1)) assert.equal((await api('DELETE', `/api/templates/${t.id}`)).status, 200);
   assert.equal((await api('DELETE', `/api/templates/${all.at(-1).id}`)).data.code, 'last_template');
+});
+
+test('retired endpoints are gone and the provider catalog is trimmed', async () => {
+  for (const route of ['/api/dashboard', '/api/keywords/test/ideas', '/js/dashboard.js']) {
+    assert.equal((await api('GET', route)).status, 404);
+  }
+  assert.equal((await api('POST', '/api/ideas/1/announce', {})).status, 404);
+  const { data } = await api('GET', '/api/providers');
+  assert.deepEqual(data.providers.map((p: any) => p.id).sort(), ['anthropic', 'deepseek', 'openai', 'openrouter', 'zai']);
 });
 
 test('static files, path traversal, unknown routes', async () => {
@@ -384,7 +377,7 @@ test('report: totals, every project, per-board insights, saved conclusions, Mark
   assert.equal(before.synthesis, null);
 
   const synthCall = (r: ChatRequest) => r.schemaName === 'synthesis';
-  const { data: after } = await api('POST', '/api/report/synthesis', { days: 30, lang: 'sv' });
+  const { data: after } = await api('POST', '/api/report/synthesis', { days: 30 });
   const call = calls.filter(synthCall).at(-1)!;
   assert.match(call.user, /Sjungande parkbänk/, 'the synthesis sees the boards’ best ideas');
   assert.match(call.user, /Claude Code projects:/);
@@ -392,8 +385,42 @@ test('report: totals, every project, per-board insights, saved conclusions, Mark
   assert.equal(typeof after.synthesis.headline, 'string');
   assert.equal(after.synthesis.days, 30);
 
-  const { data: md } = await api('GET', '/api/report.md?days=30&lang=sv');
-  assert.match(md, /^# Rapport · \d{4}-\d{2}-\d{2}/);
-  assert.match(md, /## Slutsatser/);
+  const { data: md } = await api('GET', '/api/report.md?days=30');
+  assert.match(md, /^# Report · \d{4}-\d{2}-\d{2}/);
+  assert.match(md, /## Conclusions/);
+  assert.match(md, /Use 5 · Buildable 4 · Fit 5/);
   assert.match(md, /cd ".*sjungande-bank" && claude/);
+});
+
+test('loopback Host, same-origin writes, JSON media type and English page', async () => {
+  const page = await fetch(base);
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.match(html, /<html lang="en">/);
+  assert.doesNotMatch(html, /lang-btn|exhibit-btn|dashboard-btn/);
+
+  const spoofed = await new Promise<number | undefined>((resolve, reject) => {
+    request(base, { headers: { Host: 'rebound.example' } }, (res) => {
+      res.resume();
+      resolve(res.statusCode);
+    }).on('error', reject).end();
+  });
+  assert.equal(spoofed, 403);
+
+  const boards = repo.listBoards().length;
+  const write = (origin: string, contentType: string) => fetch(base + '/api/boards', {
+    method: 'POST', headers: { Origin: origin, 'Content-Type': contentType }, body: '{"title":"TEST local board"}',
+  });
+  for (const [origin, mediaType] of [
+    ['https://other.example', 'text/plain'],
+    ['https://other.example', 'application/json'],
+    [base, 'text/plain'],
+  ]) {
+    const result = await write(origin, mediaType);
+    assert.equal(result.status, 403);
+    assert.equal(typeof (await result.json()).error, 'string');
+  }
+  assert.equal(repo.listBoards().length, boards);
+  assert.equal((await write(base, 'application/json; charset=utf-8')).status, 200);
+  assert.equal(repo.listBoards().length, boards + 1);
 });

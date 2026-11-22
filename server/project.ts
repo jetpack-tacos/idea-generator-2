@@ -7,7 +7,8 @@ import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
-import type { ChatFn, Lang } from './llm.ts';
+import type { ChatFn } from './llm.ts';
+import { localDay } from './db.ts';
 import { medal, scoreSum } from '../public/js/score.js';
 
 export type Brief = {
@@ -35,7 +36,6 @@ type IdeaLike = {
   reason: string | null;
   medalOverride: number | null;
   boardId?: number;
-  originBoardTitle?: string | null;
 };
 
 const list = (description: string) => ({ type: 'array', description, items: { type: 'string' } });
@@ -58,7 +58,6 @@ const BRIEF_SCHEMA = {
   additionalProperties: false,
 };
 
-const LANG_NAME: Record<Lang, string> = { sv: 'Swedish', en: 'English' };
 const fmt = (i: { title: string; pitch: string }) => (i.pitch ? `${i.title}: ${i.pitch}` : i.title);
 
 export function slugify(s: string) {
@@ -80,16 +79,16 @@ export function expandHome(p: string) {
 }
 
 export async function writeBrief(a: {
-  chat: ChatFn; model: string; idea: IdeaLike; goal: string; lineage: IdeaLike[]; lang: Lang;
+  chat: ChatFn; model: string; idea: IdeaLike; goal: string; lineage: IdeaLike[];
 }) {
   const sum = scoreSum(a.idea);
   const user = [
     'Turn this idea into a kickoff brief for a coding agent (Claude Code) that will build it from an empty folder.',
     `The idea:\n${fmt(a.idea)}`,
     a.goal.trim() ? `The goal of the board it came from: ${a.goal.trim()}` : '',
-    sum != null ? `Jury verdict: originality ${a.idea.originality}, feasibility ${a.idea.feasibility}, impact ${a.idea.impact} (of 5). ${a.idea.reason ?? ''}` : '',
+    sum != null ? `Jury verdict: Use ${a.idea.originality}, Buildable ${a.idea.feasibility}, Fit ${a.idea.impact} (of 5). ${a.idea.reason ?? ''}` : '',
     a.lineage.length ? `It grew out of these ideas:\n${a.lineage.map((i) => `- ${fmt(i)}`).join('\n')}` : '',
-    `Write in the language of the idea; if that is unclear, in ${LANG_NAME[a.lang]}. If Swedish, write idiomatic Swedish. The slug is always ASCII.`,
+    'Write in the language of the idea, or English if unclear. The slug is always ASCII.',
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -121,44 +120,26 @@ export async function writeBrief(a: {
   return { brief, costUsd: r.costUsd };
 }
 
-const L = {
-  sv: {
-    born: 'Projektet föddes på en idétavla i Idégeneratorn', brief: 'Den här filen är briefen: läs den innan du börjar och håll den aktuell när beslut fattas.',
-    idea: 'Idén', goal: 'Tavlans mål', verdict: 'Juryns bedömning', o: 'Originalitet', f: 'Genomförbarhet', i: 'Effekt', handset: 'Medalj satt för hand',
-    problem: 'Problem', audience: 'Vem det är för', mvp: 'MVP: minsta bygget som prövar kärnan', out: 'Utanför första versionen', stack: 'Föreslagen stack',
-    steps: 'Första stegen', questions: 'Öppna frågor', risks: 'Risker', origin: 'Var idén kom ifrån', source: 'källa',
-    kinds: { seed: 'Frö', expand: 'Förgrening', combine: 'Korsning', guest: 'Gäst' } as Record<string, string>, fromBoard: 'från tavlan',
-    agreements: 'Arbetsregler',
-    rules: [
-      'Bygg först den minsta versionen som prövar kärnmekanismen; lägg till komplexitet först när den fungerar.',
-      'Verifiera varje steg genom att köra det, inte bara genom att läsa koden.',
-      'Fråga innan något kostar pengar (betalda API:er) eller publiceras.',
-      'Anteckningar och idéer hör hemma i `vault/` (Obsidian), som aldrig checkas in.',
-    ],
-    start: 'Kom igång', then: 'Säg sedan: "Läs CLAUDE.md och föreslå en plan för första steget."',
-    vaultIntro: 'Arbetsanteckningar för projektet. Mappen är gitignorerad.',
-  },
-  en: {
-    born: 'This project was born on an idea board in Idea Generator', brief: 'This file is the brief: read it before you start, and keep it up to date as decisions are made.',
-    idea: 'The idea', goal: 'Board goal', verdict: 'Jury verdict', o: 'Originality', f: 'Feasibility', i: 'Impact', handset: 'Medal set by hand',
-    problem: 'Problem', audience: 'Who it is for', mvp: 'MVP: the smallest build that tests the core', out: 'Out of scope for now', stack: 'Suggested stack',
-    steps: 'First steps', questions: 'Open questions', risks: 'Risks', origin: 'Where the idea came from', source: 'source',
-    kinds: { seed: 'Seed', expand: 'Branch', combine: 'Cross', guest: 'Guest' } as Record<string, string>, fromBoard: 'from board',
-    agreements: 'Working agreements',
-    rules: [
-      'Build the smallest version that tests the core mechanism first; add complexity only once that works.',
-      'Verify each step by running it, not just by reading the code.',
-      'Ask before anything that costs money (paid APIs) or publishes anything.',
-      'Notes and ideas belong in `vault/` (Obsidian), which is never committed.',
-    ],
-    start: 'Getting started', then: 'Then say: "Read CLAUDE.md and propose a plan for the first step."',
-    vaultIntro: 'Working notes for the project. This folder is gitignored.',
-  },
+const LABELS = {
+  born: 'This project was born on an idea board in Idea Generator', brief: 'This file is the brief: read it before you start, and keep it up to date as decisions are made.',
+  idea: 'The idea', goal: 'Board goal', verdict: 'Jury verdict', o: 'Use', f: 'Buildable', i: 'Fit', handset: 'Medal set by hand',
+  problem: 'Problem', audience: 'Who it is for', mvp: 'MVP: the smallest build that tests the core', out: 'Out of scope for now', stack: 'Suggested stack',
+  steps: 'First steps', questions: 'Open questions', risks: 'Risks', origin: 'Where the idea came from', source: 'source',
+  kinds: { seed: 'Seed', expand: 'Branch', combine: 'Cross' } as Record<string, string>,
+  agreements: 'Working agreements',
+  rules: [
+    'Build the smallest version that tests the core mechanism first; add complexity only once that works.',
+    'Verify each step by running it, not just by reading the code.',
+    'Ask before anything that costs money (paid APIs) or publishes anything.',
+    'Notes and ideas belong in `vault/` (Obsidian), which is never committed.',
+  ],
+  start: 'Getting started', then: 'Then say: "Read CLAUDE.md and propose a plan for the first step."',
+  vaultIntro: 'Working notes for the project. This folder is gitignored.',
 };
 const MEDAL = ['', ' 🥉', ' 🥈', ' 🥇'];
 
-export function renderClaudeMd(a: { brief: Brief; idea: IdeaLike; goal: string; lineage: IdeaLike[]; lang: Lang; date: string }) {
-  const t = L[a.lang];
+export function renderClaudeMd(a: { brief: Brief; idea: IdeaLike; goal: string; lineage: IdeaLike[]; date: string }) {
+  const t = LABELS;
   const b = a.brief;
   const bullets = (xs: string[]) => xs.map((x) => `- ${x}`).join('\n');
   const sum = scoreSum(a.idea);
@@ -183,8 +164,7 @@ export function renderClaudeMd(a: { brief: Brief; idea: IdeaLike; goal: string; 
   if (a.lineage.length) {
     out.push(`## ${t.origin}`, '');
     for (const i of a.lineage) {
-      const where = i.kind === 'guest' && i.originBoardTitle ? ` (${t.fromBoard} ${i.originBoardTitle})` : '';
-      out.push(`- ${t.kinds[i.kind] ?? i.kind}${where}: **${i.title}**${i.pitch ? ` ${i.pitch}` : ''}${i.sourceUrl ? ` (${t.source}: ${i.sourceUrl})` : ''}`);
+      out.push(`- ${t.kinds[i.kind] ?? i.kind}: **${i.title}**${i.pitch ? ` ${i.pitch}` : ''}${i.sourceUrl ? ` (${t.source}: ${i.sourceUrl})` : ''}`);
     }
     out.push('');
   }
@@ -208,13 +188,14 @@ async function uniqueDir(root: string, slug: string) {
 }
 
 export async function writeProject(a: {
-  root: string; brief: Brief; idea: IdeaLike; goal: string; lineage: IdeaLike[]; lang: Lang; gitInit?: boolean;
+  root: string; brief: Brief; idea: IdeaLike; goal: string; lineage: IdeaLike[]; boardTitle: string; gitInit?: boolean;
 }) {
   const root = resolve(expandHome(a.root));
   if (!isAbsolute(expandHome(a.root))) throw new Error(`The projects folder must be an absolute path or start with ~ (got "${a.root}")`);
-  const dir = await uniqueDir(root, slugify(a.brief.slug));
-  const t = L[a.lang];
-  const date = new Date().toISOString().slice(0, 10);
+  const slug = slugify(a.brief.slug);
+  const dir = await uniqueDir(root, /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(slug) ? `idea-${slug}` : slug);
+  const t = LABELS;
+  const date = localDay();
 
   await writeFile(join(dir, 'CLAUDE.md'), renderClaudeMd({ ...a, date }));
   await writeFile(
@@ -225,7 +206,22 @@ export async function writeProject(a: {
     join(dir, 'idea.json'),
     JSON.stringify({ createdAt: new Date().toISOString(), goal: a.goal, idea: a.idea, lineage: a.lineage, brief: a.brief }, null, 2) + '\n',
   );
-  await writeFile(join(dir, '.gitignore'), ['node_modules/', '.env', '.DS_Store', '# Obsidian-vault: arbetsanteckningar, aldrig i repot', 'vault/', '.obsidian/', ''].join('\n'));
+  await writeFile(join(dir, '.gitignore'), ['node_modules/', '.env', '.DS_Store', '# Obsidian working notes', 'vault/', '.obsidian/', ''].join('\n'));
+  if (medal(a.idea) === 3) {
+    const boardTitle = a.boardTitle.replace(/[\r\n]+/g, ' ');
+    await writeFile(join(dir, 'JER-ASKED.md'), [
+      `# ${a.idea.title}`, '', 'Runs on: not decided yet',
+      `No requests yet: this idea came from the idea generator on ${date}, board "${boardTitle}".`, '',
+    ].join('\n'));
+    const sum = scoreSum(a.idea);
+    const scores = sum == null ? 'No jury scores yet.' :
+      `Use ${a.idea.originality}/5 · Buildable ${a.idea.feasibility}/5 · Fit ${a.idea.impact}/5 (${sum}/15)`;
+    const sources = [a.idea, ...a.lineage];
+    await writeFile(join(dir, 'NOTES.md'), [
+      `# ${a.idea.title}`, '', '## Jury verdict', '', 'Gold 🥇', scores, a.idea.reason ?? '', '',
+      '## Lineage', '', ...sources.map((i) => `- ${fmt(i)}${i.sourceUrl ? ` (${i.sourceUrl})` : ''}`), '',
+    ].join('\n'));
+  }
   await mkdir(join(dir, 'vault'));
   await writeFile(
     join(dir, 'vault', 'Home.md'),

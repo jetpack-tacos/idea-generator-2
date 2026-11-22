@@ -4,6 +4,7 @@
 // its jury guidance, its researchers, its autopilot pace. Templates only seed
 // a new board's flow; editing a board never changes another board.
 import { DatabaseSync } from 'node:sqlite';
+import { parseModel, ROLES, type Role } from './providers.ts';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS templates (
@@ -29,7 +30,7 @@ CREATE TABLE IF NOT EXISTS ideas (
   board_id INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
   pitch TEXT NOT NULL DEFAULT '',
-  kind TEXT NOT NULL CHECK (kind IN ('seed', 'expand', 'combine', 'guest')),
+  kind TEXT NOT NULL CHECK (kind IN ('seed', 'expand', 'combine')),
   source_url TEXT,
   x REAL NOT NULL DEFAULT 0,
   y REAL NOT NULL DEFAULT 0,
@@ -46,7 +47,7 @@ CREATE TABLE IF NOT EXISTS ideas (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS ideas_board ON ideas(board_id);
-CREATE UNIQUE INDEX IF NOT EXISTS ideas_guest_once ON ideas(board_id, origin_idea_id) WHERE origin_idea_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ideas_origin_once ON ideas(board_id, origin_idea_id) WHERE origin_idea_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS edges (
   board_id INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
   from_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
@@ -77,7 +78,7 @@ CREATE INDEX IF NOT EXISTS idea_keywords_kw ON idea_keywords(keyword);
 CREATE TABLE IF NOT EXISTS reports (
   id INTEGER PRIMARY KEY,
   days INTEGER NOT NULL,
-  lang TEXT NOT NULL,
+  lang TEXT NOT NULL DEFAULT 'en',
   content TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -96,7 +97,7 @@ CREATE TABLE IF NOT EXISTS spend (
 // output language is decided per request (same language as the seed).
 export const DEFAULT_TEMPLATES = [
   {
-    name: 'Uppfinnaren · Inventor',
+    name: 'Inventor',
     system:
       'You are a brilliant, practical inventor. You think in mechanisms: what exactly happens, for whom, and why it works. You avoid buzzwords.',
     expand:
@@ -105,16 +106,7 @@ export const DEFAULT_TEMPLATES = [
       'Fuse the two ideas into ONE new concept that neither could be alone. Name the specific mechanism that connects them; do not just list both.',
   },
   {
-    name: 'Affärsstrategen · Business',
-    system:
-      'You are a sharp business strategist who has built and sold companies. You care about who pays, why now, and what makes it hard to copy.',
-    expand:
-      'Generate 3 ideas for products, services or business models that grow out of the concept. Each must say who the customer is and how money is made, and they must differ from each other.',
-    combine:
-      "Merge the two ideas into ONE business concept where each part strengthens the other's business model. State who pays and why.",
-  },
-  {
-    name: 'Omställaren · Sustainability',
+    name: 'Sustainability',
     system:
       'You are a systems thinker working on sustainability and local communities. You favour solutions that cut resource use and that ordinary people and municipalities can start with today.',
     expand:
@@ -123,7 +115,7 @@ export const DEFAULT_TEMPLATES = [
       'Combine the two ideas into ONE solution where the sustainability gain of one multiplies the other. Be concrete about what changes.',
   },
   {
-    name: 'Galningen · Wild card',
+    name: 'Wild card',
     system:
       'You are a playful, fearless provocateur. You turn assumptions upside down and find the idea nobody dares say out loud, but every idea must still be explainable in two sentences and possible to actually try.',
     expand:
@@ -134,15 +126,25 @@ export const DEFAULT_TEMPLATES = [
 ];
 
 export type Flow = { system: string; expand: string; combine: string };
-const MODEL_ROLES = ['distill', 'expand', 'combine', 'judge', 'summary', 'research', 'x', 'brief'] as const;
+const LEGACY_TEMPLATE_NAMES = new Map([
+  ['Uppfinnaren · Inventor', 'Inventor'],
+  ['Omställaren · Sustainability', 'Sustainability'],
+  ['Galningen · Wild card', 'Wild card'],
+]);
+
+function legacyFlow(name: string, flow: Flow) {
+  if (name === 'Affärsstrategen · Business' && flow.system.startsWith('You are a sharp business strategist')) {
+    const { name, system, expand, combine } = DEFAULT_TEMPLATES[0];
+    return { name, flow: { system, expand, combine } };
+  }
+  return { name: LEGACY_TEMPLATE_NAMES.get(name) ?? name, flow };
+}
 
 export type BoardConfig = {
   flowName: string;
   flow: Flow;
   judgeGuidance: string;
   researchers: { x: { enabled: boolean; focus: string }; research: { enabled: boolean; focus: string } };
-  /** Fallback language for generated text ('sv' | 'en'); ideas otherwise follow their seed's language. */
-  lang: 'sv' | 'en';
   /** manual: people drive. auto: the server evolves the board on its own, within the limits below. */
   mode: 'manual' | 'auto';
   /** Seconds between autopilot steps (pace). */
@@ -150,7 +152,7 @@ export type BoardConfig = {
   rate: { stepsPerHour: number; usdPerDay: number };
   autoProjectOnGold: boolean;
   /** Per-role model overrides ("provider:model"); empty = the app-wide setting. */
-  models: Partial<Record<(typeof MODEL_ROLES)[number], string>>;
+  models: Partial<Record<Role, string>>;
 };
 
 export function defaultConfig(template = DEFAULT_TEMPLATES[0]): BoardConfig {
@@ -159,7 +161,6 @@ export function defaultConfig(template = DEFAULT_TEMPLATES[0]): BoardConfig {
     flow: { system: template.system, expand: template.expand, combine: template.combine },
     judgeGuidance: '',
     researchers: { x: { enabled: true, focus: '' }, research: { enabled: true, focus: '' } },
-    lang: 'sv',
     mode: 'manual',
     autopilotSeconds: 10,
     rate: { stepsPerHour: 60, usdPerDay: 1 },
@@ -180,20 +181,25 @@ export function mergeConfig(base: BoardConfig, raw: any): BoardConfig {
   const sph = Number(r.rate?.stepsPerHour);
   const usd = Number(r.rate?.usdPerDay);
   const models: BoardConfig['models'] = { ...base.models };
-  for (const role of MODEL_ROLES) {
+  for (const role of ROLES) {
     if (typeof r.models?.[role] === 'string') {
       const v = r.models[role].trim().slice(0, 200);
-      if (v) models[role] = v;
-      else delete models[role];
+      try {
+        parseModel(v);
+        models[role] = v;
+      } catch {
+        delete models[role];
+      }
     }
   }
+  const { name, flow } = legacyFlow(nonEmpty(r.flowName, 80, base.flowName), {
+    system: nonEmpty(r.flow?.system, 4000, base.flow.system),
+    expand: nonEmpty(r.flow?.expand, 4000, base.flow.expand),
+    combine: nonEmpty(r.flow?.combine, 4000, base.flow.combine),
+  });
   return {
-    flowName: nonEmpty(r.flowName, 80, base.flowName),
-    flow: {
-      system: nonEmpty(r.flow?.system, 4000, base.flow.system),
-      expand: nonEmpty(r.flow?.expand, 4000, base.flow.expand),
-      combine: nonEmpty(r.flow?.combine, 4000, base.flow.combine),
-    },
+    flowName: name,
+    flow,
     judgeGuidance: s(r.judgeGuidance, 4000, base.judgeGuidance),
     researchers: {
       x: { enabled: b(rx.enabled, base.researchers.x.enabled), focus: s(rx.focus, 300, base.researchers.x.focus) },
@@ -202,7 +208,6 @@ export function mergeConfig(base: BoardConfig, raw: any): BoardConfig {
         focus: s(rr.focus, 300, base.researchers.research.focus),
       },
     },
-    lang: r.lang === 'en' || r.lang === 'sv' ? r.lang : base.lang,
     mode: r.mode === 'auto' || r.mode === 'manual' ? r.mode : base.mode,
     autopilotSeconds: Number.isFinite(secs) ? Math.min(3600, Math.max(3, Math.round(secs))) : base.autopilotSeconds,
     rate: {
@@ -219,7 +224,7 @@ export type Idea = {
   boardId: number;
   title: string;
   pitch: string;
-  kind: 'seed' | 'expand' | 'combine' | 'guest';
+  kind: 'seed' | 'expand' | 'combine';
   sourceUrl: string | null;
   x: number;
   y: number;
@@ -251,7 +256,6 @@ export type BoardSummary = {
   gaps: string[];
   nextSteps: string[];
   ideaCount: number;
-  lang: string;
   createdAt: string;
 };
 export type Template = { id: number; name: string; system: string; expand: string; combine: string; sort: number };
@@ -269,7 +273,7 @@ const ideaFromRow = (r: any): Idea => ({
   boardId: r.board_id,
   title: r.title,
   pitch: r.pitch,
-  kind: r.kind,
+  kind: r.kind === 'expand' || r.kind === 'combine' ? r.kind : 'seed',
   sourceUrl: r.source_url,
   x: r.x,
   y: r.y,
@@ -325,6 +329,11 @@ const leadFromRow = (r: any): Lead => ({
   ideaId: r.idea_id,
   fetchedAt: r.fetched_at,
 });
+
+function templateFromRow(template: Template): Template {
+  const { name, flow } = legacyFlow(template.name, template);
+  return { ...template, ...flow, name };
+}
 
 export function openDb(file: string) {
   const db = new DatabaseSync(file);
@@ -436,10 +445,6 @@ export function openDb(file: string) {
         return repo.getIdea(id)!;
       });
     },
-    /** Is this original already a guest on that board? */
-    hasGuest(boardId: number, originIdeaId: number) {
-      return !!db.prepare('SELECT 1 FROM ideas WHERE board_id = ? AND (origin_idea_id = ? OR id = ?)').get(boardId, originIdeaId, originIdeaId);
-    },
     saveJudgement(id: number, j: { originality: number; feasibility: number; impact: number; reason: string }) {
       db.prepare(
         `UPDATE ideas SET originality = ?, feasibility = ?, impact = ?, reason = ?, judged_at = datetime('now') WHERE id = ?`,
@@ -460,88 +465,6 @@ export function openDb(file: string) {
         .prepare('SELECT keyword, COUNT(*) AS n FROM idea_keywords GROUP BY keyword ORDER BY n DESC, keyword LIMIT ?')
         .all(limit)
         .map((r: any) => r.keyword);
-    },
-    /**
-     * Keyword trends across all boards. Per keyword: how many ideas, on how many
-     * boards, mean jury sum, ideas in the last `days` vs the `days` before, and
-     * a per-day count series for the last `days`.
-     */
-    dashboard(days = 30, limit = 40) {
-      const since = `-${days} days`;
-      const before = `-${days * 2} days`;
-      const rows = db
-        .prepare(
-          `SELECT k.keyword,
-             COUNT(*) AS count,
-             COUNT(DISTINCT i.board_id) AS boards,
-             AVG(i.originality + i.feasibility + i.impact) AS mean_sum,
-             SUM(i.created_at >= datetime('now', ?)) AS recent,
-             SUM(i.created_at < datetime('now', ?) AND i.created_at >= datetime('now', ?)) AS previous
-           FROM idea_keywords k JOIN ideas i ON i.id = k.idea_id
-           GROUP BY k.keyword
-           ORDER BY recent DESC, count DESC, k.keyword
-           LIMIT ?`,
-        )
-        .all(since, since, before, limit) as any[];
-      const seriesRows = db
-        .prepare(
-          `SELECT k.keyword, substr(i.created_at, 1, 10) AS day, COUNT(*) AS n
-           FROM idea_keywords k JOIN ideas i ON i.id = k.idea_id
-           WHERE i.created_at >= datetime('now', ?)
-           GROUP BY k.keyword, day`,
-        )
-        .all(since) as any[];
-      const dayList: string[] = [];
-      for (let d = days - 1; d >= 0; d--) dayList.push(new Date(Date.now() - d * 86_400_000).toISOString().slice(0, 10));
-      const series = new Map<string, number[]>();
-      for (const r of seriesRows) {
-        if (!series.has(r.keyword)) series.set(r.keyword, dayList.map(() => 0));
-        const at = dayList.indexOf(r.day);
-        if (at >= 0) series.get(r.keyword)![at] = r.n;
-      }
-      const boards = db
-        .prepare(
-          `SELECT b.id, b.title, k.keyword, COUNT(*) AS n
-           FROM boards b JOIN ideas i ON i.board_id = b.id JOIN idea_keywords k ON k.idea_id = i.id
-           GROUP BY b.id, k.keyword ORDER BY b.id, n DESC, k.keyword`,
-        )
-        .all() as any[];
-      const perBoard = new Map<number, { id: number; title: string; keywords: { keyword: string; count: number }[] }>();
-      for (const r of boards) {
-        if (!perBoard.has(r.id)) perBoard.set(r.id, { id: r.id, title: r.title, keywords: [] });
-        const pb = perBoard.get(r.id)!;
-        if (pb.keywords.length < 6) pb.keywords.push({ keyword: r.keyword, count: r.n });
-      }
-      const totals = db
-        .prepare(
-          `SELECT (SELECT COUNT(*) FROM ideas) AS ideas, (SELECT COUNT(*) FROM boards) AS boards,
-                  (SELECT COUNT(DISTINCT keyword) FROM idea_keywords) AS keywords,
-                  (SELECT COUNT(*) FROM ideas WHERE created_at >= datetime('now', ?)) AS recent`,
-        )
-        .get(since) as any;
-      return {
-        days: dayList,
-        totals,
-        keywords: rows.map((r) => ({
-          keyword: r.keyword,
-          count: r.count,
-          boards: r.boards,
-          meanSum: r.mean_sum == null ? null : Math.round(r.mean_sum * 10) / 10,
-          recent: r.recent,
-          previous: r.previous,
-          series: series.get(r.keyword) ?? dayList.map(() => 0),
-        })),
-        boards: [...perBoard.values()],
-      };
-    },
-    ideasWithKeyword(keyword: string, limit = 100) {
-      return db
-        .prepare(
-          `SELECT i.*, b.title AS board_title FROM idea_keywords k JOIN ideas i ON i.id = k.idea_id JOIN boards b ON b.id = i.board_id
-           WHERE k.keyword = ? ORDER BY i.id DESC LIMIT ?`,
-        )
-        .all(keyword, limit)
-        .map((r: any) => ({ ...ideaFromRow(r), boardTitle: r.board_title }));
     },
     setMedalOverride(id: number, medal: number | null) {
       db.prepare('UPDATE ideas SET medal_override = ? WHERE id = ?').run(medal, id);
@@ -574,7 +497,7 @@ export function openDb(file: string) {
         .all(id)
         .map(ideaFromRow);
     },
-    /** Ancestors, nearest first. A guest continues into its original's ancestry on the other board. */
+    /** Ancestors, nearest first. Spin-off roots link back to the original idea. */
     lineage(id: number, max = 12): Idea[] {
       const out: Idea[] = [];
       const seen = new Set([id]);
@@ -624,11 +547,11 @@ export function openDb(file: string) {
 
     // ---- templates
     listTemplates(): Template[] {
-      return db.prepare('SELECT * FROM templates ORDER BY sort, id').all() as Template[];
+      return (db.prepare('SELECT * FROM templates ORDER BY sort, id').all() as Template[]).map(templateFromRow);
     },
     getTemplate(id: number | null): Template {
       const r = id == null ? null : db.prepare('SELECT * FROM templates WHERE id = ?').get(id);
-      return (r ?? db.prepare('SELECT * FROM templates ORDER BY sort, id LIMIT 1').get()) as Template;
+      return templateFromRow((r ?? db.prepare('SELECT * FROM templates ORDER BY sort, id LIMIT 1').get()) as Template);
     },
     createTemplate(t: Omit<Template, 'id' | 'sort'>): Template {
       const sort = ((db.prepare('SELECT MAX(sort) AS s FROM templates').get() as any).s ?? 0) + 1;
@@ -665,7 +588,7 @@ export function openDb(file: string) {
         return s == null ? null : s >= 13 ? 3 : s >= 11 ? 2 : s >= 9 ? 1 : 0;
       };
       const rank = (x: Idea, y: Idea) => (sum(y) ?? -1) - (sum(x) ?? -1) || y.id - x.id;
-      const brief = (i: Idea) => ({ id: i.id, boardId: i.boardId, title: i.title, pitch: i.pitch, sum: sum(i), medal: medalOf(i), reason: i.reason, kind: i.kind });
+      const brief = (i: Idea) => ({ id: i.id, boardId: i.boardId, title: i.title, pitch: i.pitch, sum: sum(i), medal: medalOf(i), reason: i.reason, kind: i.kind, originality: i.originality, feasibility: i.feasibility, impact: i.impact });
       const title = new Map(boards.map((b) => [b.id, b.title]));
       const projects = ideas
         .filter((i) => i.projectPath)
@@ -701,11 +624,11 @@ export function openDb(file: string) {
             projects: projects.filter((p) => p.boardId === b.id),
           };
         }),
-        synthesis: latest ? { ...parseJson(latest.content), days: latest.days, lang: latest.lang, createdAt: latest.created_at } : null,
+        synthesis: latest ? { ...parseJson(latest.content), days: latest.days, createdAt: latest.created_at } : null,
       };
     },
-    saveSynthesis(days: number, lang: string, content: object) {
-      db.prepare('INSERT INTO reports (days, lang, content) VALUES (?, ?, ?)').run(days, lang, JSON.stringify(content));
+    saveSynthesis(days: number, content: object) {
+      db.prepare('INSERT INTO reports (days, lang, content) VALUES (?, ?, ?)').run(days, 'en', JSON.stringify(content));
     },
 
     // ---- spend ledger (per board, per local day)
@@ -734,5 +657,5 @@ export type Repo = ReturnType<typeof openDb>;
 
 /** YYYY-MM-DD in local time: budgets reset at local midnight. */
 export function localDay(d = new Date()) {
-  return d.toLocaleDateString('sv-SE');
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }

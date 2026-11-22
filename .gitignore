@@ -4,8 +4,11 @@ data/
 *.db-wal
 *.db-shm
 .DS_Store
-# Obsidian-vaulten är arbetsanteckningar och ska aldrig till ett publikt repo
+# Obsidian working notes
 vault/
 .obsidian/
 # Demo video work files (large; not for the repo)
 demo/
+settings.local.json
+settings.local.json.*.tmp
+logs/spend.jsonl

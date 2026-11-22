@@ -8,7 +8,6 @@ import { clampScore } from '../public/js/score.js';
 import type { ChatFn } from './providers.ts';
 export type { ChatFn, ChatRequest } from './providers.ts';
 
-export type Lang = 'sv' | 'en';
 type Pitch = { title: string; pitch: string };
 type Flow = { system: string; expand: string; combine: string };
 type BoardCtx = { goal: string };
@@ -48,11 +47,11 @@ const JUDGE_SCHEMA = {
   properties: {
     reason: {
       type: 'string',
-      description: 'One sentence, at most 25 words, in the language of the idea: the main strength and the main weakness.',
+      description: 'One sentence, at most 25 words, in the language of the idea, explaining Use, Buildable and Fit.',
     },
-    originality: { type: 'integer', description: 'Integer 1–5.' },
-    feasibility: { type: 'integer', description: 'Integer 1–5.' },
-    impact: { type: 'integer', description: 'Integer 1–5.' },
+    originality: { type: 'integer', description: 'Use, integer 1–5.' },
+    feasibility: { type: 'integer', description: 'Buildable, integer 1–5.' },
+    impact: { type: 'integer', description: 'Fit, integer 1–5.' },
     keywords: {
       type: 'array',
       description: '2–4 keywords for what the idea is about: English, lowercase, singular, 1–2 words each. Reuse a keyword from the vocabulary when one fits.',
@@ -65,14 +64,8 @@ const JUDGE_SCHEMA = {
 
 // ---------------------------------------------------------------- prompts
 
-const LANG_NAME: Record<Lang, string> = { sv: 'Swedish', en: 'English' };
+const LANGUAGE_RULE = 'Write in the language of the source ideas or seed text. If unclear or mixed, write in English.';
 
-function languageRule(lang: Lang) {
-  return [
-    `Write in the same language as the source idea(s). If that is unclear or mixed, write in ${LANG_NAME[lang]}.`,
-    'If you write Swedish, write idiomatic Swedish: correct agreement, no invented compound words, no anglicisms where a Swedish word exists.',
-  ].join(' ');
-}
 
 function context(board: BoardCtx, existingTitles: string[]) {
   const parts: string[] = [];
@@ -92,29 +85,22 @@ function context(board: BoardCtx, existingTitles: string[]) {
 
 const fmtIdea = (i: Pitch) => (i.pitch ? `${i.title}: ${i.pitch}` : i.title);
 
-export const JUDGE_SYSTEM = `You are a strict, experienced innovation jury. You score ideas on three criteria, each an integer 1–5.
+export const JUDGE_SYSTEM = `You are a strict household jury. Judge the idea as written, without inventing missing details. Use integers 1–5 on these three criteria. Most ideas land around 2–3. Fewer than one in ten should score 13 or higher.
 
-ORIGINALITY
-1 = a bare topic, a category or an obvious idea everyone has heard ("electric cars", "an app for X", "use AI for Y").
-3 = a known concept applied in a genuinely new context.
-5 = a non-obvious mechanism that few people would think of.
+USE (return under originality)
+Would someone in the household use it every week?
+1: Nobody would use it. 3: Useful now and then for one person. 5: Several household members would use it weekly.
 
-FEASIBILITY
-1 = needs scientific breakthroughs or is impossible.
-3 = hard, but doable with existing technology within a few years.
-5 = could be piloted within months with means that exist today.
+BUILDABLE (return under feasibility)
+Could coding agents build a first working version in one or two sessions on a Windows PC with phones and smart-home devices nearby?
+1: Requires research breakthroughs or major hardware. 3: A multi-week project. 5: One or two agent sessions.
 
-IMPACT
-1 = trivial, or no clear benefit to anyone.
-3 = meaningful for a specific group.
-5 = large, lasting change for many people.
+FIT (return under impact)
+Does it use what the household already has: a Windows PC, Android phones, Google Home, an old tablet used as a family calendar, Claude Code and other coding agents?
+1: Needs a whole new setup. 3: Needs one new device or service. 5: Uses only what is already there.
 
-Rules:
-- A bare topic or a single word is not an idea yet: originality 1, impact at most 2.
-- Vague ideas that do not say what actually happens score at most 2 on feasibility and impact.
-- Most ideas land around 2–3 per criterion. Reserve 5 for the exceptional; fewer than one idea in ten should reach a total of 13.
-- Judge the idea as written, not the best idea it could become.
-- If the board has a goal, judge against it: impact means impact on that goal, and an idea that does not serve the goal scores at most 2 on impact however good it is otherwise. Say in the reason how well it fits the goal.`;
+A bare topic or single word is not an idea. Give it Use 1 and at most 2 on Buildable and Fit. If the idea is vague about what happens, score Buildable and Fit at most 2. Judge against the board goal. If the idea does not serve the goal, cap Fit at 2 and explain why. Explain the three scores in one concise sentence, with the main strength and weakness.`;
+
 
 const list = (description: string) => ({ type: 'array', description, items: { type: 'string' } });
 const SUMMARY_SCHEMA = {
@@ -193,12 +179,12 @@ export function makeLLM(chat: ChatFn) {
   });
 
   return {
-    async expand(a: { model: string; flow: Flow; board: BoardCtx; idea: Pitch; existingTitles: string[]; lang: Lang }) {
+    async expand(a: { model: string; flow: Flow; board: BoardCtx; idea: Pitch; existingTitles: string[] }) {
       const user = [
         a.flow.expand,
         `The concept:\n${fmtIdea(a.idea)}`,
         context(a.board, a.existingTitles),
-        languageRule(a.lang),
+        LANGUAGE_RULE,
       ]
         .filter(Boolean)
         .join('\n\n');
@@ -208,13 +194,13 @@ export function makeLLM(chat: ChatFn) {
       return { ideas: ideas.slice(0, 3), costUsd };
     },
 
-    async combine(a: { model: string; flow: Flow; board: BoardCtx; a: Pitch; b: Pitch; existingTitles: string[]; lang: Lang }) {
+    async combine(a: { model: string; flow: Flow; board: BoardCtx; a: Pitch; b: Pitch; existingTitles: string[] }) {
       const user = [
         a.flow.combine,
         `Idea 1:\n${fmtIdea(a.a)}`,
         `Idea 2:\n${fmtIdea(a.b)}`,
         context(a.board, a.existingTitles),
-        languageRule(a.lang),
+        LANGUAGE_RULE,
       ]
         .filter(Boolean)
         .join('\n\n');
@@ -225,13 +211,13 @@ export function makeLLM(chat: ChatFn) {
     },
 
     /** Turn a long text or a fetched web page into one seed idea. */
-    async distill(a: { model: string; flow: Flow; board: BoardCtx; text: string; url?: string; lang: Lang }) {
+    async distill(a: { model: string; flow: Flow; board: BoardCtx; text: string; url?: string }) {
       const user = [
         'Distill the source below into ONE seed idea for a brainstorm: the most promising concept, problem or opportunity in it. Do not summarise the whole text.',
         a.url ? `Source: ${a.url}` : '',
         `---\n${a.text}\n---`,
         context(a.board, []),
-        languageRule(a.lang),
+        LANGUAGE_RULE,
       ]
         .filter(Boolean)
         .join('\n\n');
@@ -243,18 +229,18 @@ export function makeLLM(chat: ChatFn) {
 
     /** A synthesis of everything on a board. ideas: sorted strongest first. */
     async summarize(a: {
-      model: string; board: BoardCtx; lang: Lang;
+      model: string; board: BoardCtx;
       ideas: { title: string; pitch: string; kind: string; sum: number | null; reason: string | null }[];
     }) {
       const lines = a.ideas
         .slice(0, 120)
-        .map((i) => `- ${fmtIdea(i)}${i.sum != null ? ` [jury ${i.sum}/15${i.reason ? `: ${i.reason}` : ''}]` : ' [not judged]'}${i.kind === 'guest' ? ' (guest from another board)' : ''}`)
+        .map((i) => `- ${fmtIdea(i)}${i.sum != null ? ` [jury ${i.sum}/15${i.reason ? `: ${i.reason}` : ''}]` : ' [not judged]'}`)
         .join('\n');
       const user = [
         a.board.goal.trim() ? `The board's goal: ${a.board.goal.trim()}` : 'The board has no stated goal.',
         `The ${a.ideas.length} ideas on the board, strongest first:\n${lines}`,
         'Summarise the board for the people working on it: the themes, the strongest ideas, the gaps toward the goal, and what to do next. Be specific and honest; do not praise.',
-        `Write in ${LANG_NAME[a.lang]}${a.lang === 'sv' ? ' (idiomatic Swedish)' : ''}. Keep idea titles exactly as given.`,
+        'Use the language of the ideas when clear and consistent, otherwise English. Keep idea titles exactly as given.',
       ].join('\n\n');
       const { value, costUsd } = await chat({
         model: a.model,
@@ -282,7 +268,7 @@ export function makeLLM(chat: ChatFn) {
 
     /** The report's conclusions: one synthesis across every board. */
     async synthesize(a: {
-      model: string; lang: Lang; days: number;
+      model: string; days: number;
       boards: { title: string; goal: string; summary: string; best: { title: string; pitch: string; sum: number | null }[]; projects: string[] }[];
     }) {
       const blocks = a.boards
@@ -300,7 +286,7 @@ export function makeLLM(chat: ChatFn) {
         `These are the idea boards and what they produced (the report covers the last ${a.days} days):`,
         blocks,
         'Write the conclusions of the report for the people running the boards: what holds across boards, which ideas are most worth pursuing, where boards should cross-breed, and what to do next. Be specific and honest; do not praise.',
-        `Write in ${LANG_NAME[a.lang]}${a.lang === 'sv' ? ' (idiomatic Swedish)' : ''}. Keep idea and board titles exactly as given.`,
+        'Write in English. Keep idea and board titles exactly as given.',
       ].join('\n\n');
       const { value, costUsd } = await chat({
         model: a.model,
@@ -327,13 +313,13 @@ export function makeLLM(chat: ChatFn) {
     },
 
     /** guidance: the board's own jury instructions, on top of the fixed scale. */
-    async judge(a: { model: string; board: BoardCtx; idea: Pitch; lang: Lang; guidance?: string; vocabulary?: string[] }) {
+    async judge(a: { model: string; board: BoardCtx; idea: Pitch; guidance?: string; vocabulary?: string[] }) {
       const guidance = (a.guidance ?? '').trim();
       const system = guidance ? `${JUDGE_SYSTEM}\n\nAdditional guidance from this board's facilitator:\n${guidance}` : JUDGE_SYSTEM;
       const user = [
         a.board.goal.trim() ? `The board's goal (the general direction): ${a.board.goal.trim()}` : '',
         `The idea:\n${fmtIdea(a.idea)}`,
-        `Write the reason in the language of the idea; if unclear, in ${LANG_NAME[a.lang]}.`,
+        'Write the reason in the language of the idea, or English if unclear.',
         a.vocabulary?.length ? `Keyword vocabulary in use (reuse when one fits): ${a.vocabulary.join(', ')}` : '',
       ]
         .filter(Boolean)
@@ -347,6 +333,10 @@ export function makeLLM(chat: ChatFn) {
         temperature: 0.2,
         maxTokens: 400,
       });
+      if (typeof value?.reason !== 'string' || !value.reason.trim() ||
+          ![value.originality, value.feasibility, value.impact].every(Number.isFinite)) {
+        throw new Error('The jury response needs three numeric scores and a reason');
+      }
       const judgement: Judgement = {
         originality: clampScore(value?.originality),
         feasibility: clampScore(value?.feasibility),

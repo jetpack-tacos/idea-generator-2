@@ -7,7 +7,7 @@ import { DEFAULT_APP_SETTINGS, type ChatRequest } from '../server/providers.ts';
 
 const T = Date.parse('2026-11-02T12:00:00');
 const base: RateInput = {
-  now: T, steps: [], lastAt: 0, paceSeconds: 10, stepsPerHour: 60, boardSpent: 0, boardUsdPerDay: 1,
+  now: T, activeHours: DEFAULT_APP_SETTINGS.activeHours, steps: [], lastAt: 0, paceSeconds: 10, stepsPerHour: 60, boardSpent: 0, boardUsdPerDay: 1,
   globalSpent: 0, globalUsdPerDay: 5, errors: 0, lastErrorAt: 0,
 };
 
@@ -29,6 +29,15 @@ test('rate limiter: budgets, backoff, hourly window, pace', () => {
   assert.equal(rateCheck({ ...base, steps: [T - 3_700_000, T - 1000], stepsPerHour: 2 }).ok, true, 'old steps leave the window');
 
   assert.deepEqual(rateCheck({ ...base, lastAt: T - 4000 }), { ok: false, reason: 'pace', until: T + 6000 });
+});
+
+test('active hours use local time and include start but exclude end', () => {
+  const at = (time: string, day = '02') => Date.parse(`2026-11-${day}T${time}`);
+  const check = (time: string) => rateCheck({ ...base, now: at(time) });
+  assert.deepEqual(check('07:59:59.999'), { ok: false, reason: 'night', until: at('08:00:00') });
+  assert.deepEqual(check('08:00:00'), { ok: true });
+  assert.deepEqual(check('21:59:59.999'), { ok: true });
+  assert.deepEqual(check('22:00:00'), { ok: false, reason: 'night', until: at('08:00:00', '03') });
 });
 
 test('local midnight is the next calendar day at 00:00', () => {
@@ -59,7 +68,7 @@ test('scheduler: only auto boards run, at their pace, within their limits', asyn
   const repo = openDb(':memory:');
   let now = T;
   const { engine, steps, setFail } = fakeEngineFor(repo);
-  const ap = createAutopilot({ repo, engine, settings: () => DEFAULT_APP_SETTINGS, now: () => now });
+  const ap = createAutopilot({ repo, engine, settings: () => ({ ...DEFAULT_APP_SETTINGS, maxUsdPerDay: 5 }), now: () => now });
   const auto = repo.createBoard({ title: 'Auto', config: { mode: 'auto', autopilotSeconds: 10, rate: { stepsPerHour: 3, usdPerDay: 100 } } });
   repo.createBoard({ title: 'Manual' });
   const flush = () => new Promise((r) => setTimeout(r, 5));

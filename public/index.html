@@ -1,16 +1,16 @@
 <!doctype html>
-<html lang="sv">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Idégeneratorn</title>
+  <title>Idea Generator</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='22' cy='38' r='14' fill='%233987e5'/><circle cx='42' cy='24' r='12' fill='%239085e9'/><circle cx='46' cy='46' r='8' fill='%23f5c542'/></svg>">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header id="topbar">
     <div class="bar-left">
-      <span class="brand" data-i18n="appName">Idégeneratorn</span>
+      <span class="brand" data-i18n="appName">Idea Generator</span>
       <div class="menu-wrap">
         <button id="board-menu-btn" class="btn ghost" aria-haspopup="true"></button>
         <div id="board-menu" class="menu" hidden></div>
@@ -23,13 +23,10 @@
       <button id="mode-toggle" class="mode" aria-pressed="false"></button>
       <span id="ap-status" class="ap-chip" aria-live="polite"></span>
       <button id="leads-btn" class="btn ghost" aria-expanded="false" data-i18n="leads"></button>
-      <button id="dashboard-btn" class="btn ghost" data-i18n="dashboard"></button>
       <button id="report-btn" class="btn ghost" data-i18n="report"></button>
-      <button id="exhibit-btn" class="btn ghost" data-i18n="exhibit"></button>
       <button id="export-btn" class="btn ghost" data-i18n="export"></button>
       <button id="board-settings-btn" class="icon-btn" data-i18n-title="boardSettings">⚙</button>
-      <button id="app-settings-btn" class="icon-btn" data-i18n-title="appSettings">🔑</button>
-      <button id="lang-btn" class="btn ghost small">EN</button>
+      <button id="app-settings-btn" class="icon-btn" data-i18n-title="appSettings">⚙</button>
     </div>
   </header>
 
@@ -45,21 +42,13 @@
       <form id="seedbar" autocomplete="off">
         <input id="seed-input" data-i18n-ph="seedPlaceholder" aria-label="Seed">
       </form>
-      <div id="exhibit-overlay" aria-hidden="true">
-        <h1 id="ex-title"></h1>
-        <p id="ex-goal"></p>
-        <p id="ex-status"></p>
-        <ol id="ex-top"></ol>
-      </div>
     </div>
     <aside id="panel" aria-live="polite"></aside>
   </main>
 
-  <section id="dashboard" hidden tabindex="-1"></section>
   <section id="report" class="overlay-view" hidden tabindex="-1"></section>
   <dialog id="dlg"></dialog>
   <div id="hovercard" role="tooltip"></div>
-  <div id="viz-tip" role="tooltip"></div>
   <div id="toasts" aria-live="polite"></div>
   <datalist id="model-list"></datalist>
   <script type="module" src="/js/app.js"></script>

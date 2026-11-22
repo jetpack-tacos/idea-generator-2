@@ -6,9 +6,6 @@
 //   3. error backoff (30 s, doubling, max 15 min)
 //   4. the board's steps per hour (sliding window)
 //   5. the board's pace (seconds between steps)
-// Dollar limits only see providers that report cost (OpenRouter, Anthropic).
-// A limit of 0 means "free models only": a board on a local model keeps running,
-// while the first paid call stops it.
 
 import type { Repo } from './db.ts';
 import type { Engine } from './engine.ts';
@@ -16,6 +13,7 @@ import type { AppSettings } from './providers.ts';
 
 export type RateInput = {
   now: number;
+  activeHours: AppSettings['activeHours'];
   steps: number[];
   lastAt: number;
   paceSeconds: number;
@@ -29,7 +27,7 @@ export type RateInput = {
 };
 export type RateDecision =
   | { ok: true }
-  | { ok: false; reason: 'global_budget' | 'board_budget' | 'backoff' | 'hourly' | 'pace'; until: number };
+  | { ok: false; reason: 'night' | 'global_budget' | 'board_budget' | 'backoff' | 'hourly' | 'pace'; until: number };
 
 const HOUR = 3_600_000;
 
@@ -44,6 +42,16 @@ export function backoffMs(errors: number) {
 
 /** Pure: may this board take a step now? */
 export function rateCheck(i: RateInput): RateDecision {
+  const now = new Date(i.now);
+  const [startHour, startMinute] = i.activeHours.start.split(':').map(Number);
+  const [endHour, endMinute] = i.activeHours.end.split(':').map(Number);
+  const start = new Date(now).setHours(startHour, startMinute, 0, 0);
+  const end = new Date(now).setHours(endHour, endMinute, 0, 0);
+  if (i.now < start) return { ok: false, reason: 'night', until: start };
+  if (i.now >= end) {
+    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, startHour, startMinute);
+    return { ok: false, reason: 'night', until: tomorrow.getTime() };
+  }
   const overBudget = (spent: number, limit: number) => spent > 0 && spent >= limit;
   if (overBudget(i.globalSpent, i.globalUsdPerDay)) return { ok: false, reason: 'global_budget', until: nextLocalMidnight(i.now) };
   if (overBudget(i.boardSpent, i.boardUsdPerDay)) return { ok: false, reason: 'board_budget', until: nextLocalMidnight(i.now) };
@@ -57,7 +65,7 @@ export function rateCheck(i: RateInput): RateDecision {
 }
 
 export type AutopilotStatus = {
-  /** manual | running | idle | error | pace | hourly | backoff | board_budget | global_budget */
+  /** manual | night | running | idle | error | pace | hourly | backoff | board_budget | global_budget */
   state: string;
   until?: number;
   code?: string;
@@ -85,6 +93,7 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
   async function tick() {
     const t = now();
     const globalSpent = repo.spentOn(null);
+    const { activeHours, maxUsdPerDay } = deps.settings();
     for (const b of repo.listBoards()) {
       if (b.config.mode !== 'auto') {
         if (states.delete(b.id)) engine.bus.emit(b.id, { type: 'autopilot', status: { state: 'manual' } });
@@ -100,9 +109,9 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
       const boardSpent = repo.spentOn(b.id);
       const counts = { stepsLastHour: s.steps.length, spentToday: Math.round(boardSpent * 10000) / 10000 };
       const d = rateCheck({
-        now: t, steps: s.steps, lastAt: s.lastAt, paceSeconds: b.config.autopilotSeconds,
+        now: t, activeHours, steps: s.steps, lastAt: s.lastAt, paceSeconds: b.config.autopilotSeconds,
         stepsPerHour: b.config.rate.stepsPerHour, boardSpent, boardUsdPerDay: b.config.rate.usdPerDay,
-        globalSpent, globalUsdPerDay: deps.settings().maxUsdPerDay, errors: s.errors, lastErrorAt: s.lastErrorAt,
+        globalSpent, globalUsdPerDay: maxUsdPerDay, errors: s.errors, lastErrorAt: s.lastErrorAt,
       });
       if (!d.ok) {
         // Keep the last result visible while merely pacing.

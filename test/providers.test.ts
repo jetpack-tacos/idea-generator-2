@@ -4,7 +4,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import {
-  DEFAULT_APP_SETTINGS, extractJson, keyFor, listModels, makeChat, mergeAppSettings, parseModel, ProviderError, type AppSettings,
+  extractJson, listModels, makeChat, parseModel, ProviderError,
 } from '../server/providers.ts';
 
 type Seen = { path: string; headers: Record<string, any>; body: any };
@@ -25,6 +25,10 @@ before(async () => {
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as any).port}`;
+  process.env.DEEPSEEK_API_KEY = 'ds-test';
+  process.env.ZAI_API_KEY = 'zai-test';
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+  process.env.OPENROUTER_API_KEY = 'or-test';
   // The Anthropic SDK reads its base URL from the environment.
   process.env.ANTHROPIC_BASE_URL = base;
 });
@@ -32,37 +36,13 @@ after(() => server.close());
 
 const schema = { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false };
 const req = (model: string) => ({ model, system: 'sys', user: 'usr', schemaName: 'idea', schema, temperature: 0.9 });
-const settingsWith = (patch: Partial<AppSettings>): AppSettings => ({ ...structuredClone(DEFAULT_APP_SETTINGS), ...patch });
 const oaiAnswer = (content: string, extra: object = {}) => ({ choices: [{ message: { content, ...extra } }], usage: { cost: 0.002 } });
 
-test('model references: provider prefix, Ollama tags, bare OpenRouter slugs', () => {
+test('model references: provider prefix and bare OpenRouter slugs', () => {
   assert.deepEqual(parseModel('openrouter:anthropic/claude-sonnet-5.5'), { provider: 'openrouter', model: 'anthropic/claude-sonnet-5.5' });
-  assert.deepEqual(parseModel('ollama:qwen3:8b'), { provider: 'ollama', model: 'qwen3:8b' });
+  assert.throws(() => parseModel('missing:example'), ProviderError);
   assert.deepEqual(parseModel('anthropic/claude-sonnet-5.5'), { provider: 'openrouter', model: 'anthropic/claude-sonnet-5.5' });
   assert.deepEqual(parseModel('anthropic:claude-opus-5-5'), { provider: 'anthropic', model: 'claude-opus-5-5' });
-});
-
-test('settings from the browser are merged onto defaults, junk dropped', () => {
-  const s = mergeAppSettings({
-    keys: { openrouter: ' sk-1 ', nope: 'x' }, baseUrls: { ollama: 'http://box:11434///' },
-    models: { judge: 'ollama:qwen3:8b', bogus: 'x' }, projectsRoot: 'relative/path', maxUsdPerDay: -1,
-  });
-  assert.equal(s.keys.openrouter, 'sk-1');
-  assert.equal((s.keys as any).nope, undefined);
-  assert.equal(s.baseUrls.ollama, 'http://box:11434');
-  assert.equal(s.models.judge, 'ollama:qwen3:8b');
-  assert.equal(s.models.expand, DEFAULT_APP_SETTINGS.models.expand);
-  assert.equal(s.projectsRoot, DEFAULT_APP_SETTINGS.projectsRoot, 'a relative path is refused');
-  assert.equal(s.maxUsdPerDay, DEFAULT_APP_SETTINGS.maxUsdPerDay);
-});
-
-test('a key typed in the browser wins over the environment', () => {
-  const prev = process.env.OPENAI_API_KEY;
-  process.env.OPENAI_API_KEY = 'from-env';
-  assert.equal(keyFor(settingsWith({}), 'openai'), 'from-env');
-  assert.equal(keyFor(settingsWith({ keys: { openai: 'from-browser' } }), 'openai'), 'from-browser');
-  if (prev === undefined) delete process.env.OPENAI_API_KEY;
-  else process.env.OPENAI_API_KEY = prev;
 });
 
 test('JSON is dug out of thinking tags, code fences and prose', () => {
@@ -73,68 +53,69 @@ test('JSON is dug out of thinking tags, code fences and prose', () => {
 
 test('OpenAI-compatible: strict json_schema, Bearer key, cost from usage', async () => {
   script = () => ({ status: 200, body: oaiAnswer('{"title":"Ok"}') });
-  const chat = makeChat(() => settingsWith({ baseUrls: { custom: base }, keys: { custom: 'k1' } }));
-  const out = await chat(req('custom:my-model'));
+  const chat = makeChat({ baseUrls: { openrouter: base } });
+  const out = await chat(req('openrouter:my-model'));
   assert.deepEqual(out.value, { title: 'Ok' });
   assert.equal(out.costUsd, 0.002);
   const s = seen.at(-1)!;
   assert.equal(s.path, '/chat/completions');
-  assert.equal(s.headers.authorization, 'Bearer k1');
+  assert.equal(s.headers.authorization, 'Bearer or-test');
   assert.equal(s.body.model, 'my-model');
   assert.equal(s.body.response_format.type, 'json_schema');
   assert.equal(s.body.response_format.json_schema.strict, true);
 });
 
-test('OpenAI-compatible: falls back to JSON-in-prompt when structured output is refused, drops temperature when refused', async () => {
-  seen.length = 0;
-  script = (s) => {
-    if (s.body.response_format) return { status: 400, body: { error: 'response_format json_schema is not supported' } };
-    if ('temperature' in s.body) return { status: 400, body: { error: 'Unsupported value: temperature' } };
-    return { status: 200, body: oaiAnswer('Sure! {"title":"Fallback"}') };
-  };
-  const chat = makeChat(() => settingsWith({ baseUrls: { lmstudio: base } }));
-  const out = await chat(req('lmstudio:local-model'));
-  assert.deepEqual(out.value, { title: 'Fallback' });
-  assert.equal(seen.length, 3);
-  assert.match(seen[2].body.messages[0].content, /JSON Schema/, 'the schema moved into the prompt');
-  assert.equal(seen[2].headers.authorization, undefined, 'local providers need no key');
-});
+for (const [provider, model, key, cache, cost] of [
+  ['deepseek', 'deepseek-flash', 'ds-test', { prompt_cache_hit_tokens: 400, prompt_cache_miss_tokens: 600 }, 0.0004224],
+  ['zai', 'glm-5.3-flash', 'zai-test', { prompt_tokens_details: { cached_tokens: 400 } }, 0.000202],
+] as const) {
+  test(`${provider}: strict schema, one JSON-object fallback, and cached token pricing`, async () => {
+    seen.length = 0;
+    const usage = { prompt_tokens: 1000, completion_tokens: 200, ...cache };
+    const answer = { ...oaiAnswer('{"title":"OK"}'), usage };
+    const attempts: any[] = [];
+    const chat = makeChat({ baseUrls: { [provider]: base }, log: (row) => attempts.push(row) });
+    const call = () => chat({ ...req(`${provider}:${model}`), role: 'judge', boardId: 7 });
+    script = () => ({ status: 200, body: answer });
+    const strict = await call();
+    assert.deepEqual(strict.value, { title: 'OK' });
+    assert.ok(Math.abs(strict.costUsd - cost) < 1e-12);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].path, '/chat/completions');
+    assert.equal(seen[0].headers.authorization, `Bearer ${key}`);
+    assert.deepEqual(seen[0].body.response_format, { type: 'json_schema', json_schema: { schema, name: 'idea', strict: true } });
+    assert.equal(seen[0].body.reasoning_effort, provider === 'zai' ? 'low' : 'none');
+    assert.ok(!('thinking' in seen[0].body));
 
-test('Azure uses an api-key header; 401 is a bad key, not a retry', async () => {
-  seen.length = 0;
-  script = () => ({ status: 401, body: { error: 'bad key' } });
-  const chat = makeChat(() => settingsWith({ baseUrls: { azure: base }, keys: { azure: 'az' } }));
-  await assert.rejects(chat(req('azure:my-deployment')), (e: any) => e instanceof ProviderError && e.code === 'bad_key');
-  assert.equal(seen.length, 1);
-  assert.equal(seen[0].headers['api-key'], 'az');
-  assert.equal(seen[0].headers.authorization, undefined);
-});
+    seen.length = attempts.length = 0;
+    script = (s) => s.body.response_format.type === 'json_schema'
+      ? { status: 400, body: { error: 'Unsupported response_format' } }
+      : { status: 200, body: answer };
+    const fallback = await call();
+    assert.deepEqual(fallback.value, { title: 'OK' });
+    assert.ok(Math.abs(fallback.costUsd - cost) < 1e-12);
+    assert.equal(seen.length, 2);
+    assert.deepEqual(seen[1].body.response_format, { type: 'json_object' });
+    assert.ok(seen[1].body.messages[0].content.includes(JSON.stringify(schema)));
+    assert.deepEqual(attempts.map(({ costUsd }) => Number(costUsd.toFixed(10))), [0, cost]);
+    assert.deepEqual(attempts.map(({ costUsd, ...attempt }) => attempt), [
+      { model: `${provider}:${model}`, boardId: 7, role: 'judge', inputTokens: 0, outputTokens: 0 },
+      { model: `${provider}:${model}`, boardId: 7, role: 'judge', inputTokens: 1000, outputTokens: 200 },
+    ]);
+    seen.length = 0;
+    script = () => ({ status: 400, body: { error: 'Unsupported response_format' } });
+    await assert.rejects(call(), (e: any) => e.code === 'provider_error');
+    assert.equal(seen.length, 2);
+  });
+}
 
 test('missing key and missing search are explained, not sent', async () => {
   const prev = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
-  const chat = makeChat(() => settingsWith({}));
+  const chat = makeChat();
   await assert.rejects(chat(req('openai:gpt-5.4-mini')), (e: any) => e.code === 'no_key');
-  await assert.rejects(chat({ ...req('ollama:qwen3:8b'), plugins: [{ id: 'web' }] }), (e: any) => e.code === 'no_search');
+  await assert.rejects(chat({ ...req('deepseek:deepseek-flash'), plugins: [{ id: 'web' }] }), (e: any) => e.code === 'no_search');
   if (prev !== undefined) process.env.OPENAI_API_KEY = prev;
-});
-
-test('Ollama: native API with think:false and the schema as format', async () => {
-  seen.length = 0;
-  script = (s) =>
-    'think' in s.body && s.body.model === 'no-think'
-      ? { status: 400, body: { error: '"no-think" does not support thinking' } }
-      : { status: 200, body: { message: { content: '{"title":"Lokal"}' } } };
-  const chat = makeChat(() => settingsWith({ baseUrls: { ollama: base } }));
-  const out = await chat(req('ollama:qwen3:8b'));
-  assert.deepEqual(out.value, { title: 'Lokal' });
-  assert.equal(out.costUsd, 0);
-  assert.equal(seen[0].path, '/api/chat');
-  assert.equal(seen[0].body.think, false);
-  assert.deepEqual(seen[0].body.format, schema);
-  assert.equal(seen[0].body.stream, false);
-  await chat(req('ollama:no-think'));
-  assert.ok(!('think' in seen.at(-1)!.body), 'retried without think');
 });
 
 test('Anthropic (SDK): output_config with JSON schema and low effort, no temperature, cost from usage', async () => {
@@ -146,7 +127,7 @@ test('Anthropic (SDK): output_config with JSON schema and low effort, no tempera
       content: [{ type: 'text', text: '{"title":"Från Claude"}' }], usage: { input_tokens: 1000, output_tokens: 100 },
     },
   });
-  const chat = makeChat(() => settingsWith({ keys: { anthropic: 'sk-ant-test' } }));
+  const chat = makeChat();
   const out = await chat(req('anthropic:claude-sonnet-5-5'));
   assert.deepEqual(out.value, { title: 'Från Claude' });
   assert.equal(out.costUsd, (1000 * 2 + 100 * 10) / 1e6);
@@ -160,10 +141,8 @@ test('Anthropic (SDK): output_config with JSON schema and low effort, no tempera
 });
 
 test('model lists double as a connection test', async () => {
-  script = (s) =>
-    s.path === '/api/tags' ? { status: 200, body: { models: [{ name: 'qwen3:8b' }, { name: 'gemma3:4b' }] } }
-    : { status: 200, body: { data: [{ id: 'b' }, { id: 'a' }] } };
-  assert.deepEqual(await listModels(settingsWith({ baseUrls: { ollama: base } }), 'ollama'), ['qwen3:8b', 'gemma3:4b']);
-  assert.deepEqual(await listModels(settingsWith({ baseUrls: { mlx: base } }), 'mlx'), ['a', 'b']);
-  await assert.rejects(listModels(settingsWith({ baseUrls: { mlx: 'http://127.0.0.1:1' } }), 'mlx'), (e: any) => e.code === 'unreachable');
+  script = () => ({ status: 200, body: { data: [{ id: 'b' }, { id: 'a' }] } });
+  assert.deepEqual(await listModels('deepseek', { deepseek: base }), ['a', 'b']);
+  assert.equal(seen.at(-1)!.path, '/models');
+  await assert.rejects(listModels('deepseek', { deepseek: 'http://127.0.0.1:1' }), (e: any) => e.code === 'unreachable');
 });

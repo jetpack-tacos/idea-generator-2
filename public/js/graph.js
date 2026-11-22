@@ -8,7 +8,7 @@
 import { medal, scoreSum } from './score.js';
 
 // Validated with the dataviz palette checks against the canvas background (#0f1116).
-export const KIND_COLORS = { seed: '#3987e5', expand: '#199e70', combine: '#9085e9', guest: '#d55181' };
+export const KIND_COLORS = { seed: '#3987e5', expand: '#199e70', combine: '#9085e9' };
 const MEDAL_COLORS = [null, '#cd7f32', '#c9d1d9', '#f5c542'];
 const BG = '#0f1116';
 const TEXT = '#eef0f4';
@@ -44,12 +44,10 @@ export class Graph {
     this.dropTarget = null;
     this.drag = null;
     this.pointers = new Map();
-    this.lastUser = 0;
-    this.followNewest = false;
     this.dirty = true;
     this.wasSettled = true;
     this.focusCache = { id: null, set: null, edges: null };
-    /** Screen space covered by overlays (seed bar, exhibition title) that fit() should keep clear. */
+    /** Screen space covered by overlays (seed bar) that fit() should keep clear. */
     this.insets = { top: 30, right: 30, bottom: 100, left: 30 };
 
     new ResizeObserver(() => this.resize()).observe(canvas);
@@ -90,7 +88,6 @@ export class Graph {
         born: animate ? performance.now() : 0, fx: null, fy: null,
       });
       this.alpha = Math.max(this.alpha, 0.5);
-      if (animate && this.followNewest && performance.now() - this.lastUser > 8000) this.focusOn(idea.id, null);
     }
     this.focusCache.id = null;
     this.dirty = true;
@@ -435,15 +432,6 @@ export class Graph {
     ctx.strokeStyle = m ? MEDAL_COLORS[m] : color + '99';
     ctx.stroke();
 
-    if (idea.kind === 'guest') {
-      ctx.beginPath();
-      ctx.arc(n.x, n.y, r + 6, 0, Math.PI * 2);
-      ctx.setLineDash([4, 6]);
-      ctx.strokeStyle = KIND_COLORS.guest;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
     if (this.selected === n.id || this.pick === n.id) {
       ctx.beginPath();
       ctx.arc(n.x, n.y, r + 9, 0, Math.PI * 2);
@@ -546,7 +534,6 @@ export class Graph {
     c.addEventListener('pointerdown', (e) => {
       c.setPointerCapture(e.pointerId);
       this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      this.lastUser = performance.now();
       this.camTarget = null;
       if (this.pointers.size === 2) {
         const [a, b] = [...this.pointers.values()];
@@ -658,7 +645,6 @@ export class Graph {
       'wheel',
       (e) => {
         e.preventDefault();
-        this.lastUser = performance.now();
         this.camTarget = null;
         // Pinch (ctrlKey) and mouse wheels zoom; two-finger trackpad scroll pans.
         const mouseWheel = e.deltaMode !== 0 || (e.deltaX === 0 && Number.isInteger(e.deltaY) && Math.abs(e.deltaY) >= 40);

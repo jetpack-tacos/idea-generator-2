@@ -1,40 +1,38 @@
-// Calibrate the judge against known-weak and known-strong ideas, with the
-// real model. Costs money (about 22 judge calls), so it is not part of
-// `npm test`. Any provider works; keys come from the environment:
-//   npm run calibrate
-//   npm run calibrate -- --model anthropic:claude-haiku-5-5
-//   npm run calibrate -- --model ollama:qwen3:8b
-// Re-run it whenever you point the judge at a different model.
-//
-// The weak set includes bare topics ("fire", "electric cars") that an
-// uncalibrated LLM judge rated 3/3 "gold". This judge must not.
+// Paid calibration is a separate command from the fake-provider test suite.
 
 import { makeLLM } from '../server/llm.ts';
-import { DEFAULT_APP_SETTINGS, makeChat } from '../server/providers.ts';
+import { makeChat } from '../server/providers.ts';
+import { openSettings } from '../server/settings.ts';
+import { spendLogger } from '../server/spend.ts';
+import { join } from 'node:path';
 import { medalFromSum } from '../public/js/score.js';
 
+// Provisional household examples. Replace this reference set in a later stage.
 const WEAK = [
-  'fire',
-  'Electric cars',
-  'En app för att hitta nya vänner',
-  'Använd AI för att förbättra vården',
-  'Make cities greener',
-  'Solpaneler på taken',
+  'Fire',
+  'Smart home',
+  'A robot that folds and puts away every kind of laundry with no setup',
+  'Replace every lock and switch in the house with a custom hardware standard',
+  'Use AI to make the house more organized',
+  'A reminder for a once-a-year household event',
 ];
 
 const STRONG = [
-  'Reservdelsbibliotek: Folkbiblioteken 3D-skannar och skriver ut trasiga plastdetaljer till hushållsapparater på beställning, så att en bruten lucka inte gör att en fungerande diskmaskin kasseras.',
-  'Elmätaren som anhöriglarm: En billig sensor på elmätaren känner igen apparaters strömsignaturer och skickar sms till anhöriga när en äldre persons morgonrutin med vattenkokare och kaffebryggare uteblir.',
-  'Skolbussen som paketbil: Landsbygdens skolbussar tar paket och apotekspåsar i ett låst bagageutrymme mellan morgon- och eftermiddagsturen, så att glesbygden får dagliga leveranser utan nya fordon.',
-  "Pothole map from bus suspensions: accelerometers already fitted in city buses flag repeated jolts at the same GPS spot, and the road department gets a ranked repair list every morning.",
-  "Receipt-to-swap coach: the grocery chain's loyalty app turns each receipt into three concrete swaps for the next shop that cut saturated fat, each costing the same or less.",
+  'Tomorrow strip: The family calendar tablet highlights the first event and departure time tomorrow. Anyone can add a leave-by time on their Android phone.',
+  'Weekly shop checklist: A page hosted on the Windows PC lets each phone add items to one shared list. The tablet shows unchecked items, and anyone can mark an item bought.',
+  'Chore handoff: Each evening the calendar tablet shows who last completed the kitchen and laundry chores. Household members tap Done on the tablet or on their phones.',
+  'Bin night: The family calendar tablet shows this week’s collection and which bin to put out from a local schedule file. Checking it off on a phone clears the reminder for everyone.',
+  'Quiet mornings: A shared weekday schedule on the Windows PC shows departure times and lets each person flag when the bathroom is free from their Android phone.',
 ];
 
+const settings = openSettings(join(import.meta.dirname, '..', 'settings.local.json')).get();
 const modelArg = process.argv.indexOf('--model');
-const model = modelArg > 0 ? process.argv[modelArg + 1] : DEFAULT_APP_SETTINGS.models.judge;
+const model = modelArg > 0 ? process.argv[modelArg + 1] : settings.models.judge;
+if (!model) throw new Error('Give --model a provider:model value');
 const RUNS = 2;
 
-const llm = makeLLM(makeChat(() => DEFAULT_APP_SETTINGS));
+const chat = makeChat({ log: spendLogger() });
+const llm = makeLLM((request) => chat({ ...request, role: 'judge' }));
 const board = { goal: '' };
 const asIdea = (text: string) => {
   const [title, ...rest] = text.split(': ');
@@ -47,7 +45,7 @@ async function judgeAll(texts: string[]) {
     texts.map(async (text) => {
       const runs = [];
       for (let r = 0; r < RUNS; r++) {
-        const { judgement, costUsd } = await llm.judge({ model, board, idea: asIdea(text), lang: 'sv' });
+        const { judgement, costUsd } = await llm.judge({ model, board, idea: asIdea(text) });
         cost += costUsd;
         runs.push(judgement);
       }
@@ -65,7 +63,7 @@ for (const [label, rows] of [['WEAK', weak], ['STRONG', strong]] as const) {
     const j = r.runs[0];
     console.log(
       `  ${r.sums.map((s) => String(s).padStart(2)).join(' ')}  ${r.sums.map((s) => MEDAL[medalFromSum(s)!]).join('')}  ` +
-        `O${j.originality} F${j.feasibility} I${j.impact}  ${r.text.slice(0, 48)}`,
+        `Use ${j.originality} Buildable ${j.feasibility} Fit ${j.impact}  ${r.text.slice(0, 48)}`,
     );
     console.log(`        ↳ ${j.reason}`);
   }

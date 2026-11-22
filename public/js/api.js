@@ -3,7 +3,7 @@
 export async function api(method, url, body) {
   const res = await fetch(url, {
     method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
+    headers: method !== 'GET' ? { 'Content-Type': 'application/json' } : {},
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const isJson = res.headers.get('content-type')?.includes('json');

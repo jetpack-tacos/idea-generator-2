@@ -1,56 +1,24 @@
-# CLAUDE.md – Idea Generator 2
+# Idea Generator
 
-Node 25 runs the TypeScript server directly; the frontend is vanilla ES modules. There is no build step. Port 8300, loopback only.
+The server runs TypeScript directly on Node 24.11.1 or newer. The frontend uses vanilla ES modules. SQLite is provided by `node:sqlite`.
 
-## Commands
+- `npm start` serves the app on `127.0.0.1:8300` by default and starts autopilot. `PORT` and `DB_FILE` are optional overrides.
+- `npm test` uses fake providers and temporary databases.
+- `npm run spend` shows today's per-model usage from `logs/spend.jsonl`.
+- `npm run calibrate -- --model provider:model` runs paid jury checks against provisional household examples.
 
-- `npm start` – server on http://localhost:8300 (`PORT`, `HOST`, `DB_FILE` override)
-- `npm test` – 50 tests (`node --test`), fake LLM and fake provider servers, no network
-- `npm run calibrate [-- --model provider:model]` – real judge against weak and strong reference ideas. It costs money. **Re-run it whenever the judge's prompt, schema or model changes.**
+## Server and browser
 
-## Layout
+- `server/settings.ts` loads `settings.local.json` on startup and atomically replaces it when Settings is saved. Defaults come from `settings.example.json`. Keys come from environment variables.
+- `server/providers.ts` routes DeepSeek, Z.ai, OpenRouter, Anthropic, and OpenAI. DeepSeek and Z.ai try a JSON Schema first and retry with JSON object mode plus the schema in the system prompt when a 400 rejects `response_format`. GLM uses low reasoning effort. DeepSeek uses peak rates for budget accounting.
+- `server/autopilot.ts` and `server/engine.ts` evolve automatic boards. The scheduler checks local active hours and recorded budgets before each step. `server/spend.ts` logs provider attempts, including retries.
+- `server/app.ts` validates the loopback Host header, requires JSON and a same-origin Origin header when present on writes, and publishes board changes over SSE.
+- `server/leads.ts` contains the Hugging Face research scout and optional OpenRouter X scout. The X scout has no default model and keeps only cited posts.
+- `server/project.ts` creates uniquely named project folders. Gold folders include the request stub and jury and source notes.
+- `public/js/app.js` and `public/js/report.js` render the English interface. Model text goes into the DOM as text nodes.
 
-- `server/providers.ts` – `provider:model` routing.
-  - Ollama uses the native `/api/chat` with `think:false` and `format:schema`.
-  - Anthropic uses the official SDK with `output_config.format`.
-  - Everything else is OpenAI-compatible.
-- `server/llm.ts` – every prompt, including the judge (`JUDGE_SYSTEM`). Each function takes `model`.
-- `server/engine.ts` – every operation, the background judge queue (max 3) and the per-board event bus.
-- `server/autopilot.ts` – the scheduler and the pure `rateCheck()`.
-- `server/leads.ts` – the X and research scouts.
-- `server/project.ts` – Claude Code folders.
-- `server/db.ts` – SQLite (`node:sqlite`), plus `report()` and `dashboard()` queries.
-- `server/app.ts` – HTTP, SSE (`/api/boards/:id/events`) and Markdown exports.
-- `public/js/score.js` and `public/js/evolve.js` – pure modules shared by the server, browser and tests.
-- `public/js/graph.js` – the canvas.
-- `public/js/app.js` – the main app.
-- `public/js/dashboard.js` and `public/js/report.js` – the trends and report views.
+## Jury and compatibility
 
-## Rules that matter
+`server/llm.ts` asks the jury to score the stated idea against the board goal. Use means weekly household use. Buildable means a first version in one or two agent sessions. Fit means using the household's current devices and tools. Keep the existing SQLite columns `originality`, `feasibility`, and `impact` for those three scores. `public/js/score.js` awards bronze at 9, silver at 11, and gold at 13.
 
-- **The medal comes from code, not the model:** a sum of three 1–5 scores, bronze from 9, silver from 11, gold from 13 (`score.js`). Left uncalibrated, an LLM jury gave 3/3 to the bare word "fire"; the calibration test keeps that from happening here.
-- **Never put integer `minimum`/`maximum` in a JSON schema.** Anthropic rejects them. Put the range in the description and clamp in code.
-- **Anthropic native: send no `temperature`.** API version 2026-10-21 rejects it. Use effort `low`. The SDK sends the key as a Bearer token.
-- **OpenRouter: send `reasoning:{enabled:false}`** and retry without it on a 400 that mentions reasoning (some models insist on reasoning).
-- **X scout:** a lead is kept only if its URL is in the search engine's `url_citation` annotations. Never trust a URL the model wrote. Only OpenRouter (Grok) can search X.
-- **App settings live in the browser's localStorage.** The server holds them in memory, and the SSE `hello` tells the browser to push them again after a restart. Board configuration lives in the DB.
-- **Dollar limits only see providers that report cost** (OpenRouter `usage.cost`, Anthropic via the price table). A limit of 0 means free models only.
-- **Text goes into the DOM as text nodes, never `innerHTML`** (`dom.js`). Ideas are written by models and by visitors.
-- **Project folders never overwrite.** They are created with a non-recursive `mkdir`, and a taken name gets `-2`.
-
-## Measured
-
-- **Sonnet 5.5 judge** (2026-11-02):
-  - weak ideas: mean 4.7, max 5
-  - strong ideas: mean 9.8
-  - run-to-run spread 0
-  - about $0.003 per judgement
-- **`ollama:qwen3:8b` as judge FAILS calibration:**
-  - gave bronze to "Solpaneler på taken"
-  - gave gold to 5 of 10 strong runs
-  - spread 4 between runs
-  - long reasons and Swedish errors
-
-  Use local models to generate ideas, not to judge them.
-- **X scout:** about 48 s and $0.04 per refresh; 5 of 6 leads were cited.
-- **Providers tested live:** OpenRouter, OpenAI and Ollama (generation and model listing). Not yet tested against the live services: Azure / Microsoft Foundry, MLX, LM Studio, and Anthropic direct (only against a fake server). GitHub Models was removed: GitHub retired it on 30 July 2026 (every endpoint now answers a bare `200 OK`). Use the Test button in Settings.
+Keep score ranges in the schema descriptions and clamp scores in code. Idea generation, judging reasons, and project brief content use the idea's language with English as the fallback.

@@ -4,15 +4,16 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "description": "Idégeneratorn: frö, förgrena, korsa, bedöm, och låt evolutionen avla fram de bästa idéerna.",
+  "description": "An idea board with a household jury and a server-side evolution autopilot.",
   "engines": {
-    "node": ">=25"
+    "node": ">=24.11.1"
   },
   "scripts": {
     "start": "node server/index.ts",
     "dev": "node --watch-path=server --watch-path=public/js/score.js --watch-path=public/js/evolve.js server/index.ts",
     "test": "node --test \"test/**/*.test.ts\"",
-    "calibrate": "node tools/calibrate-judge.ts"
+    "calibrate": "node tools/calibrate-judge.ts",
+    "spend": "node tools/spend.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.3.0"

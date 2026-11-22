@@ -1,6 +1,6 @@
 // The engine: every operation on boards and ideas, used by both the HTTP routes
 // and the autopilot. New ideas are judged in the background (a small queue),
-// so announced guests get judged even on boards nobody has open. Every change
+// even on boards nobody has open. Every change
 // is published on a per-board bus that the browser follows over SSE.
 
 import { execFile } from 'node:child_process';
@@ -55,7 +55,7 @@ export function arcPositions(parent: Idea, grandparent: Idea | null, n: number) 
   });
 }
 
-/** Where a newcomer (guest, lead) lands: just right of what is already on the board. */
+/** Where a lead lands: just right of what is already on the board. */
 function besideBoard(ideas: Idea[]) {
   if (!ideas.length) return { x: 0, y: 0 };
   const maxX = Math.max(...ideas.map((i) => i.x));
@@ -77,8 +77,10 @@ export function createEngine(deps: Deps) {
   const { repo } = deps;
   const fetchPage = deps.fetchPage ?? realFetchPage;
   const fetchPapers = deps.fetchPapers ?? realFetchPapers;
-  const reveal = deps.reveal ?? ((p: string) => execFile('open', [p], () => {}));
-  const llm = makeLLM(deps.chat);
+  const reveal = deps.reveal ?? ((p: string) => {
+    const command = { win32: 'explorer.exe', darwin: 'open' }[process.platform as 'win32' | 'darwin'] ?? 'xdg-open';
+    execFile(command, [p], () => {});
+  });
   const bus = createBus();
   const judging = new Set<number>();
 
@@ -96,12 +98,21 @@ export function createEngine(deps: Deps) {
   const titles = (boardId: number) => repo.listIdeas(boardId).map((i) => i.title);
   const emitIdeas = (boardId: number, ideas: Idea[]) => ideas.length && bus.emit(boardId, { type: 'ideas', ideas });
 
-  /** Every LLM call: spend lands on the board's ledger; failures become 502s that keep the provider's code. */
-  async function call<T extends { costUsd: number }>(boardId: number, fn: () => Promise<T>): Promise<T> {
+  async function call<T>(boardId: number, role: Role, fn: (llm: ReturnType<typeof makeLLM>, chat: ChatFn) => Promise<T>): Promise<T> {
+    const chat: ChatFn = async (request) => {
+      let recorded = false;
+      const result = await deps.chat({
+        ...request, boardId: boardId || undefined, role,
+        onUsage(usage) {
+          recorded = true;
+          repo.addSpend(boardId, usage.costUsd);
+        },
+      });
+      if (!recorded) repo.addSpend(boardId, result.costUsd);
+      return result;
+    };
     try {
-      const out = await fn();
-      repo.addSpend(boardId, out.costUsd);
-      return out;
+      return await fn(makeLLM(chat), chat);
     } catch (e: any) {
       if (e instanceof AppError) throw e;
       throw new AppError(502, e instanceof ProviderError ? e.code : 'llm_failed', e?.message ?? String(e));
@@ -115,15 +126,16 @@ export function createEngine(deps: Deps) {
     bus.emit(boardId, { type: 'judging', ids, on });
   }
 
-  async function createProject(idea: Idea) {
+  async function makeProject(requested: Idea) {
+    const idea = mustIdea(requested.id);
     if (idea.projectPath && existsSync(idea.projectPath)) return { idea, path: idea.projectPath, existed: true };
     const board = mustBoard(idea.boardId);
     const lineage = repo.lineage(idea.id);
-    const lang = board.config.lang;
-    const { brief } = await call(board.id, () => writeBrief({ chat: deps.chat, model: modelFor(board, 'brief'), idea, goal: board.goal, lineage, lang }));
+
+    const { brief } = await call(board.id, 'brief', (_llm, chat) => writeBrief({ chat, model: modelFor(board, 'brief'), idea, goal: board.goal, lineage }));
     let path: string;
     try {
-      path = await writeProject({ root: deps.settings().projectsRoot, brief, idea, goal: board.goal, lineage, lang, gitInit: deps.gitInit });
+      path = await writeProject({ root: deps.settings().projectsRoot, brief, idea, goal: board.goal, lineage, boardTitle: board.title, gitInit: deps.gitInit });
     } catch (e: any) {
       throw new AppError(500, 'project_failed', e?.message ?? String(e));
     }
@@ -132,14 +144,24 @@ export function createEngine(deps: Deps) {
     return { idea: saved, path, existed: false };
   }
 
+  const projectsInProgress = new Map<number, ReturnType<typeof makeProject>>();
+  function createProject(idea: Idea) {
+    let pending = projectsInProgress.get(idea.id);
+    if (!pending) {
+      pending = makeProject(idea).finally(() => projectsInProgress.delete(idea.id));
+      projectsInProgress.set(idea.id, pending);
+    }
+    return pending;
+  }
+
   async function judge(ideaId: number) {
     const idea = mustIdea(ideaId);
     const board = mustBoard(idea.boardId);
     setJudging(board.id, [idea.id], true);
     try {
-      const { judgement } = await call(board.id, () =>
+      const { judgement } = await call(board.id, 'judge', (llm) =>
         llm.judge({
-          model: modelFor(board, 'judge'), board, idea, lang: board.config.lang,
+          model: modelFor(board, 'judge'), board, idea,
           guidance: board.config.judgeGuidance, vocabulary: repo.keywordVocabulary(),
         }),
       );
@@ -198,8 +220,8 @@ export function createEngine(deps: Deps) {
   async function doExpand(parentId: number) {
     const parent = mustIdea(parentId);
     const board = mustBoard(parent.boardId);
-    const { ideas } = await call(board.id, () =>
-      llm.expand({ model: modelFor(board, 'expand'), flow: board.config.flow, board, idea: parent, existingTitles: titles(board.id), lang: board.config.lang }),
+    const { ideas } = await call(board.id, 'expand', (llm) =>
+        llm.expand({ model: modelFor(board, 'expand'), flow: board.config.flow, board, idea: parent, existingTitles: titles(board.id) }),
     );
     const spots = arcPositions(parent, repo.parentsOf(parent.id)[0] ?? null, ideas.length);
     const created = ideas.map((i, n) =>
@@ -217,8 +239,8 @@ export function createEngine(deps: Deps) {
     const a = mustIdea(aId);
     const c = mustIdea(bId);
     if (a.boardId !== board.id || c.boardId !== board.id) throw new AppError(400, 'bad_pair', 'Ideas belong to another board');
-    const { idea } = await call(board.id, () =>
-      llm.combine({ model: modelFor(board, 'combine'), flow: board.config.flow, board, a, b: c, existingTitles: titles(board.id), lang: board.config.lang }),
+    const { idea } = await call(board.id, 'combine', (llm) =>
+        llm.combine({ model: modelFor(board, 'combine'), flow: board.config.flow, board, a, b: c, existingTitles: titles(board.id) }),
     );
     const dx = c.x - a.x, dy = c.y - a.y, len = Math.hypot(dx, dy) || 1; // midpoint, nudged off the line
     const created = repo.insertIdea(
@@ -246,7 +268,7 @@ export function createEngine(deps: Deps) {
       const board = mustBoard(boardId);
       const text = String(b.text ?? '').trim().slice(0, 20_000);
       if (!text) throw new AppError(400, 'empty', 'Write an idea or paste a link');
-      const lang = board.config.lang;
+
       const flow = board.config.flow;
       const url = asUrl(text);
       let title = text.slice(0, 120);
@@ -260,13 +282,14 @@ export function createEngine(deps: Deps) {
           throw new AppError(422, 'url_unreadable', `${url}: ${e?.message ?? e}`);
         }
         if (page.text.length < 80) throw new AppError(422, 'url_no_text', `${url}: too little readable text`);
-        const { idea } = await call(board.id, () =>
-          llm.distill({ model: modelFor(board, 'distill'), flow, board, text: [page.title, page.text].filter(Boolean).join('\n\n'), url, lang }),
+        const { idea } = await call(board.id, 'distill', (llm) =>
+        llm.distill({ model: modelFor(board, 'distill'), flow, board, text: [page.title, page.text].filter(Boolean).join('\n\n'), url }),
         );
         ({ title, pitch } = idea);
         sourceUrl = url;
       } else if (text.length > 160) {
-        const { idea } = await call(board.id, () => llm.distill({ model: modelFor(board, 'distill'), flow, board, text, lang }));
+        const { idea } = await call(board.id, 'distill', (llm) =>
+        llm.distill({ model: modelFor(board, 'distill'), flow, board, text }));
         ({ title, pitch } = idea);
       }
       const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
@@ -315,35 +338,6 @@ export function createEngine(deps: Deps) {
       return { ok };
     },
 
-    /** Announce an idea to other boards: each gets a guest copy that can cross-breed there. */
-    announce(ideaId: number, boardIds: unknown) {
-      const idea = mustIdea(ideaId);
-      const isGuest = idea.kind === 'guest' && idea.originIdeaId;
-      const originIdeaId = isGuest ? idea.originIdeaId! : idea.id;
-      const originBoardId = isGuest ? idea.originBoardId : idea.boardId;
-      const wanted: number[] =
-        boardIds === 'all' ? repo.listBoards().map((x) => x.id) : (Array.isArray(boardIds) ? boardIds : []).filter(Number.isInteger);
-      const guests: { boardId: number; idea: Idea }[] = [];
-      const skipped: number[] = [];
-      for (const boardId of [...new Set(wanted)]) {
-        if (boardId === idea.boardId) continue;
-        if (!repo.getBoard(boardId) || repo.hasGuest(boardId, originIdeaId)) {
-          skipped.push(boardId);
-          continue;
-        }
-        const at = besideBoard(repo.listIdeas(boardId));
-        const guest = repo.insertIdea({
-          boardId, title: idea.title, pitch: idea.pitch, kind: 'guest', sourceUrl: idea.sourceUrl,
-          x: at.x, y: at.y, generation: 0, originIdeaId, originBoardId,
-        });
-        guests.push({ boardId, idea: guest });
-        emitIdeas(boardId, [guest]);
-      }
-      // Judged against each target board's own goal, not the one it came from.
-      queueJudge(guests.map((g) => g.idea.id));
-      return { guests, skipped };
-    },
-
     /** Spin an idea off into its own board, to refine it in its own context. */
     spinoff(ideaId: number) {
       const idea = mustIdea(ideaId);
@@ -373,21 +367,22 @@ export function createEngine(deps: Deps) {
         .sort((x, y) => (fitness(y) ?? -1) - (fitness(x) ?? -1))
         .map((i) => ({ title: i.title, pitch: i.pitch, kind: i.kind, sum: scoreSum(i), reason: i.reason }));
       if (ideas.length < 2) throw new AppError(400, 'too_few', 'A summary needs at least two ideas');
-      const lang = board.config.lang;
-      const { summary } = await call(board.id, () => llm.summarize({ model: modelFor(board, 'summary'), board, ideas, lang }));
-      const saved = repo.setSummary(board.id, { ...summary, ideaCount: ideas.length, lang, createdAt: new Date().toISOString() })!;
+
+      const { summary } = await call(board.id, 'summary', (llm) =>
+        llm.summarize({ model: modelFor(board, 'summary'), board, ideas }));
+      const saved = repo.setSummary(board.id, { ...summary, ideaCount: ideas.length, createdAt: new Date().toISOString() })!;
       bus.emit(board.id, { type: 'board', board: saved });
       return { board: saved };
     },
 
     /** The report's conclusions across every board, saved so the window opens instantly. */
-    async synthesize(days: number, lang: 'sv' | 'en') {
+    async synthesize(days: number) {
       const report = repo.report(days);
       const boards = report.boards.filter((b) => b.ideaCount);
       if (!boards.length) throw new AppError(400, 'too_few', 'There are no ideas to report on yet');
-      const { synthesis } = await call(0, () =>
+      const { synthesis } = await call(0, 'summary', (llm) =>
         llm.synthesize({
-          model: deps.settings().models.summary, lang, days,
+          model: deps.settings().models.summary, days,
           boards: boards.map((b) => ({
             title: b.title, goal: b.goal, summary: b.summary?.headline ?? '',
             best: b.best.map((i) => ({ title: i.title, pitch: i.pitch, sum: i.sum })),
@@ -395,19 +390,20 @@ export function createEngine(deps: Deps) {
           })),
         }),
       );
-      repo.saveSynthesis(days, lang, synthesis);
+      repo.saveSynthesis(days, synthesis);
       return repo.report(days);
     },
 
     // ---- leads: each board's own researchers
     async refreshLeads(boardId: number, source: 'x' | 'research') {
       const board = mustBoard(boardId);
-      const lang = board.config.lang;
+
       const focus = board.config.researchers[source].focus;
       const topic = [board.goal, focus].filter(Boolean).join(' — ');
       let r: { leads: any[]; dropped?: number };
       if (source === 'x') {
-        r = await call(board.id, () => xLeads({ chat: deps.chat, model: modelFor(board, 'x'), goal: topic, lang }));
+        if (!modelFor(board, 'x')) throw new AppError(400, 'scout_disabled', 'Choose an X scout model first');
+        r = await call(board.id, 'x', (_llm, chat) => xLeads({ chat, model: modelFor(board, 'x'), goal: topic }));
       } else {
         let papers;
         try {
@@ -415,7 +411,7 @@ export function createEngine(deps: Deps) {
         } catch (e: any) {
           throw new AppError(502, 'research_failed', e?.message ?? String(e));
         }
-        r = await call(board.id, () => researchLeads({ chat: deps.chat, model: modelFor(board, 'research'), goal: topic, lang, papers }));
+        r = await call(board.id, 'research', (_llm, chat) => researchLeads({ chat, model: modelFor(board, 'research'), goal: topic, papers }));
       }
       // Nothing verified: keep the old leads rather than wiping the panel.
       const leads = r.leads.length ? repo.replaceLeads(board.id, source, r.leads) : repo.listLeads(board.id).filter((l) => l.source === source);

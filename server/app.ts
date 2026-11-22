@@ -8,14 +8,13 @@ import { extname, join, resolve, sep } from 'node:path';
 import type { Repo, Idea, Board } from './db.ts';
 import { AppError, type Engine } from './engine.ts';
 import type { Autopilot } from './autopilot.ts';
-import { PROVIDERS, keySource, listModels, mergeAppSettings, type AppSettings, type ProviderId } from './providers.ts';
+import { PROVIDERS, keyFor, listModels, type AppSettings, type ProviderId } from './providers.ts';
+import { mergeAppSettings } from './settings.ts';
 import { fitness, medal, scoreSum } from '../public/js/score.js';
 
 export type Runtime = {
   get(): AppSettings;
   set(s: AppSettings): void;
-  /** Has a browser pushed its settings since the server started? */
-  received(): boolean;
 };
 
 type Deps = { repo: Repo; engine: Engine; autopilot: Autopilot; runtime: Runtime; publicDir: string };
@@ -57,23 +56,15 @@ function send(res: ServerResponse, status: number, body: unknown, type = 'applic
 }
 
 const LABELS = {
-  sv: {
-    flow: 'Flöde', ideas: 'idéer', exported: 'Exporterad', seed: 'Frö', source: 'Källa', parents: 'Föräldrar',
-    originality: 'Originalitet', feasibility: 'Genomförbarhet', impact: 'Effekt', unjudged: 'Ej bedömd',
-    handset: 'satt för hand', guest: 'Gäst från tavlan', project: 'Claude Code-projekt',
-    summary: 'Sammanfattning', strongest: 'Starkast', gaps: 'Luckor', next: 'Nästa steg', stale: 'Sammanfattningen är äldre än tavlan',
-  },
-  en: {
-    flow: 'Flow', ideas: 'ideas', exported: 'Exported', seed: 'Seed', source: 'Source', parents: 'Parents',
-    originality: 'Originality', feasibility: 'Feasibility', impact: 'Impact', unjudged: 'Not judged',
-    handset: 'set by hand', guest: 'Guest from board', project: 'Claude Code project',
-    summary: 'Summary', strongest: 'Strongest', gaps: 'Gaps', next: 'Next steps', stale: 'The summary is older than the board',
-  },
+  flow: 'Flow', ideas: 'ideas', exported: 'Exported', seed: 'Seed', source: 'Source', parents: 'Parents',
+  originality: 'Use', feasibility: 'Buildable', impact: 'Fit', unjudged: 'Not judged',
+  handset: 'set by hand', project: 'Claude Code project',
+  summary: 'Summary', strongest: 'Strongest', gaps: 'Gaps', next: 'Next steps', stale: 'The summary is older than the board',
 };
 const MEDAL_ICON = ['', '🥉 ', '🥈 ', '🥇 '];
 
-export function boardMarkdown(board: Board, ideas: Idea[], edges: { from: number; to: number }[], lang: 'sv' | 'en') {
-  const L = LABELS[lang];
+export function boardMarkdown(board: Board, ideas: Idea[], edges: { from: number; to: number }[]) {
+  const L = LABELS;
   const byId = new Map(ideas.map((i) => [i.id, i]));
   const parents = new Map<number, Idea[]>();
   for (const e of edges) {
@@ -110,7 +101,6 @@ export function boardMarkdown(board: Board, ideas: Idea[], edges: { from: number
     if (i.keywords.length) out.push(i.keywords.map((k) => `\`${k}\``).join(' '), '');
     const ps = parents.get(i.id);
     if (ps?.length) out.push(`${L.parents}: ${ps.map((p) => p.title).join(' × ')}`, '');
-    else if (i.kind === 'guest') out.push(`${L.guest} ${i.originBoardTitle ?? '?'}`, '');
     else if (i.sourceUrl) out.push(`${L.seed} · ${L.source}: ${i.sourceUrl}`, '');
     else out.push(`${L.seed}`, '');
     if (i.projectPath) out.push(`${L.project}: \`${i.projectPath}\``, '');
@@ -118,23 +108,18 @@ export function boardMarkdown(board: Board, ideas: Idea[], edges: { from: number
   return out.join('\n');
 }
 
+const reportScores = (i: { sum: number | null; originality: number | null; feasibility: number | null; impact: number | null }) =>
+  i.sum == null ? '' : ` · Use ${i.originality} · Buildable ${i.feasibility} · Fit ${i.impact}`;
+
 const REPORT_LABELS = {
-  sv: {
-    title: 'Rapport', period: 'Senaste {n} dagarna', boards: 'tavlor', ideas: 'idéer', newIdeas: 'nya', projects: 'Claude Code-projekt',
-    spent: 'Förbrukat', conclusions: 'Slutsatser', insights: 'Insikter', standouts: 'Mest värt att driva vidare', opportunities: 'Möjligheter',
-    next: 'Nästa steg', goal: 'Mål', best: 'Bästa idéerna', summary: 'Sammanfattning', stale: 'äldre än tavlan', none: 'Inga ännu.',
-    start: 'Starta',
-  },
-  en: {
-    title: 'Report', period: 'Last {n} days', boards: 'boards', ideas: 'ideas', newIdeas: 'new', projects: 'Claude Code projects',
-    spent: 'Spent', conclusions: 'Conclusions', insights: 'Insights', standouts: 'Most worth pursuing', opportunities: 'Opportunities',
-    next: 'Next steps', goal: 'Goal', best: 'Best ideas', summary: 'Summary', stale: 'older than the board', none: 'None yet.',
-    start: 'Start',
-  },
+  title: 'Report', period: 'Last {n} days', boards: 'boards', ideas: 'ideas', newIdeas: 'new', projects: 'Claude Code projects',
+  spent: 'Spent', conclusions: 'Conclusions', insights: 'Insights', standouts: 'Most worth pursuing', opportunities: 'Opportunities',
+  next: 'Next steps', goal: 'Goal', best: 'Best ideas', summary: 'Summary', stale: 'older than the board', none: 'None yet.',
+  start: 'Start',
 };
 
-export function reportMarkdown(r: ReturnType<Repo['report']>, lang: 'sv' | 'en') {
-  const L = REPORT_LABELS[lang];
+export function reportMarkdown(r: ReturnType<Repo['report']>) {
+  const L = REPORT_LABELS;
   const m = r.totals.medals;
   const out = [
     `# ${L.title} · ${new Date().toISOString().slice(0, 10)}`, '',
@@ -150,14 +135,14 @@ export function reportMarkdown(r: ReturnType<Repo['report']>, lang: 'sv' | 'en')
   }
   out.push(`## ${L.projects}`, '');
   if (!r.projects.length) out.push(L.none, '');
-  for (const p of r.projects) out.push(`- **${p.title}** (${p.boardTitle}${p.sum != null ? `, ${p.sum}/15` : ''}): \`cd "${p.path}" && claude\``);
+  for (const p of r.projects) out.push(`- **${p.title}** (${p.boardTitle}${p.sum != null ? `, ${p.sum}/15${reportScores(p)}` : ''}): \`cd "${p.path}" && claude\``);
   out.push('');
   for (const b of r.boards) {
     out.push(`## ${b.title}`, '');
     if (b.goal) out.push(`> ${L.goal}: ${b.goal}`, '');
     out.push(`${b.ideaCount} ${L.ideas} (${b.newIdeas} ${L.newIdeas})`, '');
     if (b.summary) out.push(`**${L.summary}${b.summary.stale ? ` (${L.stale})` : ''}:** ${b.summary.headline}`, '');
-    if (b.best.length) out.push(`**${L.best}:**`, ...b.best.map((i) => `- ${MEDAL_ICON[i.medal ?? 0]}${i.title}${i.sum != null ? ` — ${i.sum}/15` : ''}`), '');
+    if (b.best.length) out.push(`**${L.best}:**`, ...b.best.map((i) => `- ${MEDAL_ICON[i.medal ?? 0]}${i.title}${i.sum != null ? ` — ${i.sum}/15${reportScores(i)}` : ''}`), '');
   }
   return out.join('\n');
 }
@@ -166,13 +151,10 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir }: D
   const root = resolve(publicDir);
 
   function providerStatus() {
-    const s = runtime.get();
     return {
-      settingsReceived: runtime.received(),
       providers: (Object.keys(PROVIDERS) as ProviderId[]).map((id) => ({
-        id, label: PROVIDERS[id].label, local: !!PROVIDERS[id].local, needsKey: PROVIDERS[id].needsKey,
-        search: !!PROVIDERS[id].search, note: PROVIDERS[id].note ?? null, keySource: keySource(s, id),
-        baseUrl: s.baseUrls[id] ?? null,
+        id, label: PROVIDERS[id].label, env: PROVIDERS[id].env,
+        search: !!PROVIDERS[id].search, keySource: keyFor(id) ? 'env' : null,
       })),
       spentToday: repo.spentOn(null),
       spentTotal: repo.spentTotal(),
@@ -181,16 +163,23 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir }: D
 
   type Handler = (p: string[], body: any, url: URL) => Promise<unknown> | unknown;
   const routes: [string, RegExp, Handler][] = [
-    // ---- app settings: owned by the browser, held here in memory only
+    // ---- server settings
+    ['GET', /^\/api\/runtime-settings$/, () => runtime.get()],
     ['PUT', /^\/api\/runtime-settings$/, (_p, b) => {
-      runtime.set(mergeAppSettings(b));
-      return providerStatus();
+      let next: AppSettings;
+      try {
+        next = mergeAppSettings(b, runtime.get());
+      } catch (error: any) {
+        throw new AppError(400, 'bad_settings', error.message);
+      }
+      runtime.set(next);
+      return runtime.get();
     }],
     ['GET', /^\/api\/providers$/, () => providerStatus()],
     ['POST', /^\/api\/providers\/([a-z]+)\/models$/, async ([id]) => {
-      if (!(id in PROVIDERS)) throw new AppError(404, 'not_found', 'Unknown provider');
+      if (!Object.hasOwn(PROVIDERS, id)) throw new AppError(404, 'not_found', 'Unknown provider');
       try {
-        return { models: await listModels(runtime.get(), id as ProviderId) };
+        return { models: await listModels(id as ProviderId) };
       } catch (e: any) {
         throw new AppError(502, e?.code ?? 'provider_error', e?.message ?? String(e));
       }
@@ -199,13 +188,11 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir }: D
     // ---- boards
     ['GET', /^\/api\/boards$/, () => ({ boards: repo.listBoards() })],
     ['POST', /^\/api\/boards$/, (_p, b) => {
-      const lang = b.lang === 'en' ? 'en' : 'sv';
       return {
         board: repo.createBoard({
-          title: str(b.title, 120) || (lang === 'en' ? 'New board' : 'Ny tavla'),
+          title: str(b.title, 120) || 'New board',
           goal: str(b.goal, 600),
           templateId: Number.isInteger(b.templateId) ? b.templateId : null,
-          config: { lang },
         }),
       };
     }],
@@ -239,11 +226,10 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir }: D
       repo.savePositions(+id, positions);
       return { ok: true, saved: positions.length };
     }],
-    ['GET', /^\/api\/boards\/(\d+)\/export\.md$/, ([id], _b, url) => {
+    ['GET', /^\/api\/boards\/(\d+)\/export\.md$/, ([id]) => {
       const board = repo.getBoard(+id);
       if (!board) throw new AppError(404, 'not_found', 'Board not found');
-      const lang = url.searchParams.get('lang') === 'en' ? 'en' : 'sv';
-      return { __raw: boardMarkdown(board, repo.listIdeas(board.id), repo.listEdges(board.id), lang), type: 'text/markdown; charset=utf-8' };
+      return { __raw: boardMarkdown(board, repo.listIdeas(board.id), repo.listEdges(board.id)), type: 'text/markdown; charset=utf-8' };
     }],
     ['POST', /^\/api\/boards\/(\d+)\/summary$/, ([id]) => engine.summarize(+id)],
 
@@ -259,7 +245,6 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir }: D
     ['DELETE', /^\/api\/ideas\/(\d+)$/, ([id]) => engine.deleteIdea(+id)],
     ['POST', /^\/api\/ideas\/(\d+)\/project$/, ([id]) => engine.createProject(+id)],
     ['POST', /^\/api\/ideas\/(\d+)\/reveal$/, ([id]) => engine.reveal(+id)],
-    ['POST', /^\/api\/ideas\/(\d+)\/announce$/, ([id], b) => engine.announce(+id, b.boardIds)],
     ['POST', /^\/api\/ideas\/(\d+)\/spinoff$/, ([id]) => engine.spinoff(+id)],
 
     // ---- leads
@@ -267,15 +252,11 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir }: D
     ['POST', /^\/api\/leads\/(\d+)\/seed$/, ([id], b) => engine.seedLead(+id, b)],
     ['DELETE', /^\/api\/leads\/(\d+)$/, ([id]) => ({ ok: repo.deleteLead(+id) })],
 
-    // ---- dashboard: keyword trends across all boards
-    ['GET', /^\/api\/dashboard$/, (_p, _b, url) => repo.dashboard(Math.min(365, Math.max(1, Number(url.searchParams.get('days')) || 30)))],
-    ['GET', /^\/api\/keywords\/([^/]+)\/ideas$/, ([kw]) => ({ ideas: repo.ideasWithKeyword(decodeURIComponent(kw)) })],
-
     // ---- report: insights, ideas and projects across all boards
     ['GET', /^\/api\/report$/, (_p, _b, url) => repo.report(daysOf(url))],
-    ['POST', /^\/api\/report\/synthesis$/, (_p, b) => engine.synthesize(Math.min(365, Math.max(1, Number(b.days) || 30)), b.lang === 'en' ? 'en' : 'sv')],
+    ['POST', /^\/api\/report\/synthesis$/, (_p, b) => engine.synthesize(Math.min(365, Math.max(1, Number(b.days) || 30)))],
     ['GET', /^\/api\/report\.md$/, (_p, _b, url) => ({
-      __raw: reportMarkdown(repo.report(daysOf(url)), url.searchParams.get('lang') === 'en' ? 'en' : 'sv'),
+      __raw: reportMarkdown(repo.report(daysOf(url))),
       type: 'text/markdown; charset=utf-8',
     })],
 
@@ -296,14 +277,14 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir }: D
   }
 
   /** Server-sent events: everything that happens on one board, live. */
-  function events(boardId: number, req: IncomingMessage, res: ServerResponse) {
+  function events(boardId: number, res: ServerResponse) {
     if (!repo.getBoard(boardId)) return send(res, 404, { error: 'Board not found' });
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     const write = (e: unknown) => res.write(`data: ${JSON.stringify(e)}\n\n`);
-    write({ type: 'hello', autopilot: autopilot.status(boardId), settingsReceived: runtime.received() });
+    write({ type: 'hello', autopilot: autopilot.status(boardId) });
     const off = engine.bus.on(boardId, write);
     const ping = setInterval(() => res.write(': ping\n\n'), 25_000);
-    req.on('close', () => {
+    res.on('close', () => {
       off();
       clearInterval(ping);
     });
@@ -322,14 +303,26 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir }: D
   }
 
   return async function handler(req: IncomingMessage, res: ServerResponse) {
-    const url = new URL(req.url ?? '/', 'http://localhost');
+    const host = req.headers.host;
+    const port = req.socket.localPort;
+    if (host !== `localhost:${port}` && host !== `127.0.0.1:${port}`) {
+      return send(res, 403, { error: 'Forbidden host' });
+    }
+    if (req.method !== 'GET') {
+      const origin = req.headers.origin;
+      const mediaType = req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase();
+      if ((origin !== undefined && origin !== `http://${host}`) || mediaType !== 'application/json') {
+        return send(res, 403, { error: 'Forbidden request' });
+      }
+    }
     try {
+      const url = new URL(req.url ?? '/', `http://${host}`);
       if (!url.pathname.startsWith('/api/')) {
         if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, { error: 'Method not allowed' });
         return await serveStatic(url.pathname, res);
       }
       const ev = url.pathname.match(/^\/api\/boards\/(\d+)\/events$/);
-      if (ev && req.method === 'GET') return events(+ev[1], req, res);
+      if (ev && req.method === 'GET') return events(+ev[1], res);
       for (const [method, re, fn] of routes) {
         const m = url.pathname.match(re);
         if (!m || method !== req.method) continue;
@@ -341,7 +334,7 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir }: D
       throw new AppError(404, 'not_found', `No route for ${req.method} ${url.pathname}`);
     } catch (e: any) {
       const status = e instanceof AppError ? e.status : 500;
-      if (status >= 500) console.error(`[${req.method} ${url.pathname}]`, e?.message ?? e);
+      if (status >= 500) console.error(`[${req.method} ${req.url}]`, e?.message ?? e);
       send(res, status, { error: e?.message ?? 'Server error', code: e?.code ?? 'server_error' });
     }
   };

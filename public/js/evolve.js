@@ -85,12 +85,11 @@ export function nextMove(ideas, edges, opts = {}) {
 
 /**
  * Has quality moved? Mean fitness of the first and the latest `window` bred
- * ideas (seeds and guests excluded: a bare topic scores low by design and
- * would flatter the climb, and guests were bred on another board), plus the best so far.
+ * ideas (seeds are excluded because bare topics score low), plus the best so far.
  */
 export function evolutionStats(ideas, window = 8) {
   const bred = ideas
-    .filter((i) => i.kind !== 'seed' && i.kind !== 'guest' && fitness(i) != null)
+    .filter((i) => i.kind !== 'seed' && fitness(i) != null)
     .sort((a, b) => a.id - b.id);
   const mean = (xs) => (xs.length ? xs.reduce((s, i) => s + fitness(i), 0) / xs.length : null);
   const generation = ideas.reduce((g, i) => Math.max(g, i.generation || 0), 0);
