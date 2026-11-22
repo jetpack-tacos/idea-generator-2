@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { decodeEntities, request, type Find } from './http.ts';
 
-type Feed = { name: string; kind: 'topics' | 'site'; id: string };
+type Feed = { name: string; kind: 'topics' | 'site' | 'search'; id: string };
 const LOCAL = join(import.meta.dirname, '../../sources.local.json');
 
 function field(item: string, name: string) {
@@ -45,13 +45,14 @@ export async function fetch(
   const finds = new Map<string, Find>();
   let succeeded = 0;
   for (const [index, feed] of feeds.entries()) {
-    if (!feed?.id || typeof feed.id !== 'string' || typeof feed.name !== 'string' || (feed.kind !== 'topics' && feed.kind !== 'site')) {
+    if (!feed?.id || typeof feed.id !== 'string' || typeof feed.name !== 'string' || !['topics', 'site', 'search'].includes(feed.kind)) {
       log(`[scouts] google-news invalid feed at position ${index + 1}`);
       continue;
     }
     if (index) await wait(2000);
     const id = encodeURIComponent(feed.id);
-    const target = feed.kind === 'topics' ? `topics/${id}?` : `search?q=site:${id}&`;
+    // 'search' feeds are plain search words, for subjects Jer named that have no Google News topic.
+    const target = feed.kind === 'topics' ? `topics/${id}?` : feed.kind === 'site' ? `search?q=site:${id}&` : `search?q=${id}&`;
     try {
       const response = await request(`https://news.google.com/rss/${target}hl=en-US&gl=US&ceid=US:en`, transport);
       for (const find of parseFeed(await response.text(), feed.name)) finds.set(find.externalId, find);

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fetch as trending } from '../server/scouts/github-trending.ts';
 import { fetch as githubNew } from '../server/scouts/github-new.ts';
@@ -10,6 +11,7 @@ import { fetch as lobsters } from '../server/scouts/lobsters.ts';
 import { fetch as papers } from '../server/scouts/papers.ts';
 import { fetch as googleNews } from '../server/scouts/google-news.ts';
 
+const NO_CONFIG = join(import.meta.dirname, 'no-such-sources.json');
 const trendingHtml = readFileSync(join(import.meta.dirname, 'fixtures/github-trending.html'), 'utf8');
 
 test('public scouts map live response shapes and fetch only the configured endpoints', async (t) => {
@@ -61,8 +63,8 @@ test('public scouts map live response shapes and fetch only the configured endpo
     ['test-maker/solder-notes', 'test-maker/solder-notes', ''],
   ]);
   assert.deepEqual(fetched.filter((url) => url.pathname === '/trending').map((url) => url.search), ['', '?since=daily']);
-  assert.equal((await githubNew(transport, Date.parse('2026-11-22T00:00:00Z'), 'test-token'))[0].externalId, '998');
-  await githubNew(transport, Date.parse('2026-11-22T00:00:00Z'), '');
+  assert.equal((await githubNew(transport, Date.parse('2026-11-22T00:00:00Z'), 'test-token', NO_CONFIG))[0].externalId, '998');
+  await githubNew(transport, Date.parse('2026-11-22T00:00:00Z'), '', NO_CONFIG);
   assert.equal(requestHeaders[0].get('User-Agent'), 'idea-generator');
   assert.equal(requestHeaders[0].get('Authorization'), 'Bearer test-token');
   assert.equal(requestHeaders[1].get('Authorization'), null);
@@ -115,6 +117,44 @@ test('hackernews tolerates single item 502 and missing story time; JSON scouts g
   ]);
 
   const badShapeTransport: typeof fetch = async () => new Response(JSON.stringify({ message: 'rate limit' }), { status: 200 });
-  await assert.rejects(githubNew(badShapeTransport), /invalid repository list/i);
+  await assert.rejects(githubNew(badShapeTransport, Date.now(), '', NO_CONFIG), /invalid repository list/i);
   await assert.rejects(lobsters(badShapeTransport), /invalid story list/i);
+});
+
+test('github-new adds keyword searches from the local sources file, and Google News takes search feeds', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ideagen-sources-'));
+  try {
+    const config = join(dir, 'sources.json');
+    writeFileSync(config, JSON.stringify({
+      githubSearches: ['m5stack', 'macrodroid', ''],
+      googleNews: [{ name: 'MacroDroid', kind: 'search', id: 'MacroDroid NFC' }],
+    }));
+    const urls: URL[] = [];
+    const repo = (id: number) => ({ id, full_name: `t/r${id}`, html_url: `https://github.com/t/r${id}`, description: null, created_at: '2026-11-20T00:00:00Z' });
+    const transport: typeof fetch = async (input) => {
+      const url = new URL(String(input));
+      urls.push(url);
+      if (url.hostname === 'news.google.com') {
+        return new Response('<rss><channel><item><title>T</title><link>https://example.test/n</link><guid>n1</guid></item></channel></rss>', { status: 200 });
+      }
+      const q = url.searchParams.get('q')!;
+      if (q.startsWith('macrodroid')) return new Response('rate limited', { status: 403 });
+      return new Response(JSON.stringify({ items: q.startsWith('created') ? [repo(1), repo(2)] : [repo(2), repo(3)] }), { status: 200 });
+    };
+    const pauses: number[] = [];
+    const logs: string[] = [];
+    const finds = await githubNew(transport, Date.parse('2026-11-22T00:00:00Z'), '', config, async (ms) => { pauses.push(ms); }, (m) => logs.push(m));
+    assert.deepEqual(finds.map((f) => f.externalId), ['1', '2', '3'], 'keyword results added once each');
+    assert.deepEqual(urls.map((u) => u.searchParams.get('q')), ['created:>2026-11-15', 'm5stack pushed:>2026-11-15', 'macrodroid pushed:>2026-11-15', 'macrodroid pushed:>2026-11-15']);
+    assert.deepEqual(pauses, [10_000, 10_000, 61_000], 'a refused search waits for the next minute and tries once more');
+    assert.match(logs[0], /search "macrodroid" failed/);
+
+    urls.length = 0;
+    const news = await googleNews(transport, config, async () => {}, () => {});
+    assert.equal(news.length, 1);
+    assert.equal(urls[0].pathname, '/rss/search');
+    assert.equal(urls[0].searchParams.get('q'), 'MacroDroid NFC');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
