@@ -17,10 +17,11 @@ const FIT = {
 export const SESSION_QUESTIONS = {
   wish: {
     type: 'noul',
-    instructions: 'Does this message express a wish for a tool, a frustration with a task, or a need that something could be built for?',
+    // Tuned 2026-11-22 on 194 real messages: the older "frustration with a task" wording kept only build feedback.
+    instructions: "Does this message show a chore, hassle or need that keeps coming back in the writer's life, home, family or computer use, which a small standing tool could take over? A repeat request ('like past sessions have done'), a recurring annoyance or a wish for something to happen by itself counts. One-off feedback on the software, page or game being built in the conversation does not.",
     criteria: {
-      true_description: 'The message expresses a wish for a tool, a frustration with a task, or a need that something could be built for.',
-      false_description: 'Routine coding instructions, factual questions, greetings, or pasted logs with no unmet tool need.',
+      true_description: "Shows a recurring chore, hassle or wish in daily life, the home, the family or the writer's own computer routines that a small standing tool could handle.",
+      false_description: 'One-off feedback, bug reports or design notes about the software, page or game being built in the conversation; single coding steps; approvals such as yes or go; pasted logs or image notes.',
     },
   },
   personal: {

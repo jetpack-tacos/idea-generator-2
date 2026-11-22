@@ -1,12 +1,20 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { join } from 'node:path';
 import { judgeManySessions, type SessionJudgement } from './filter.ts';
 import type { Find } from './http.ts';
 
 const THREE_DAYS_MS = 3 * 86_400_000;
 const WISH_CUE = /\b(wish|want|need|frustrat\w*|annoy\w*|tired of|hate|automate|tool|script|app|build|if only|would be nice|pain|manual(?:ly)?)\b/i;
+
+export const MAX_ITEMS_PER_ROUND = 300;
+// Text the app, hooks or other sessions put into a user turn; never a wish typed by a person.
+const APP_TEXT = /^(<|Base directory for this skill|Background \(from the session|Stop hook feedback|Caveat: |This session is being continued|\[Request interrupted|\[SCHEDULED TASK|\[Image:)/;
+const APP_BLOCK = /<(system-reminder|task-notification|local-command-stdout|command-[a-z-]+)\b[^>]*>[\s\S]*?<\/\1>/g;
+// A message typed mid-turn arrives wrapped in app text; keep only the person's words.
+const MID_TURN_START = /^The user sent a new message while you were working:\s*/;
+const MID_TURN_END = /\s*This is how Claude Code surfaces messages[\s\S]*$/;
 
 function plainContent(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -14,6 +22,7 @@ function plainContent(content: unknown): string {
     return content
       .filter((part: any) => part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string')
       .map((part: any) => part.text)
+      .filter((text: string) => !APP_TEXT.test(text.trim()))
       .join('\n');
   }
   return '';
@@ -21,6 +30,8 @@ function plainContent(content: unknown): string {
 
 export function extractUserMessageText(row: any): string | null {
   if (!row || typeof row !== 'object') return null;
+  // Hook feedback, skill text, helper threads, summaries and headless helper runs are not typed by a person.
+  if (row.isMeta || row.isSidechain || row.isCompactSummary || row.entrypoint === 'sdk-cli') return null;
   let content: unknown = null;
   if (row.role === 'user') {
     content = row.content ?? row.text;
@@ -31,7 +42,10 @@ export function extractUserMessageText(row: any): string | null {
   } else {
     return null;
   }
-  const text = plainContent(content).replace(/\s+/g, ' ').trim();
+  let raw = plainContent(content).trim();
+  if (MID_TURN_START.test(raw)) raw = raw.replace(MID_TURN_START, '').replace(MID_TURN_END, '').trim();
+  if (APP_TEXT.test(raw)) return null;
+  const text = raw.replace(APP_BLOCK, ' ').replace(/\s+/g, ' ').trim();
   return text.length >= 15 ? text : null;
 }
 
@@ -69,7 +83,7 @@ function deriveTitle(excerpt: string): string {
 }
 
 async function listRecentJsonl(root: string, cutoffMs: number): Promise<string[]> {
-  const out: string[] = [];
+  const out: { file: string; mtime: number }[] = [];
   async function walk(dir: string, depth: number) {
     if (depth > 8) return;
     let entries;
@@ -82,11 +96,12 @@ async function listRecentJsonl(root: string, cutoffMs: number): Promise<string[]
       if (entry.isSymbolicLink()) continue;
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
+        if (entry.name.toLowerCase() === 'subagents') continue; // helper threads, written by Claude
         await walk(full, depth + 1);
       } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.jsonl')) {
         try {
           const st = await stat(full);
-          if (st.mtimeMs >= cutoffMs) out.push(full);
+          if (st.mtimeMs >= cutoffMs) out.push({ file: full, mtime: st.mtimeMs });
         } catch {
           /* ignore unreadable file */
         }
@@ -94,7 +109,8 @@ async function listRecentJsonl(root: string, cutoffMs: number): Promise<string[]
     }
   }
   await walk(root, 0);
-  return out.sort();
+  // Oldest first, so the per-round cap keeps the newest messages.
+  return out.sort((a, b) => a.mtime - b.mtime || a.file.localeCompare(b.file)).map((x) => x.file);
 }
 
 async function readJsonlLines(file: string, onLine: (line: string, idx: number) => void, maxLineChars = 512 * 1024): Promise<void> {
@@ -167,9 +183,8 @@ export async function fetchSessionWishes(opts: {
   const items: { id: string; text: string }[] = [];
   const seenIds = new Set<string>();
   for (const file of files) {
-    const rel = relative(root, file).replace(/\\/g, '/');
     try {
-      await readJsonlLines(file, (line, idx) => {
+      await readJsonlLines(file, (line) => {
         let parsed: any;
         try {
           parsed = JSON.parse(line);
@@ -178,7 +193,8 @@ export async function fetchSessionWishes(opts: {
         }
         const text = extractUserMessageText(parsed);
         if (!text) return;
-        const id = createHash('sha256').update(`${rel}:${idx}:${text.slice(0, 200)}`).digest('hex').slice(0, 16);
+        // The id comes from the text alone, so a forked session's copy of a message is judged only once.
+        const id = createHash('sha256').update(text).digest('hex').slice(0, 16);
         if (seenIds.has(id) || opts.seen?.(id)) return;
         seenIds.add(id);
         items.push({ id, text: text.slice(0, 4000) });
@@ -188,6 +204,8 @@ export async function fetchSessionWishes(opts: {
     }
   }
   if (!items.length) return [];
+  // A capped batch keeps judge_many inside its time limit; older messages wait for a later round.
+  items.splice(0, Math.max(0, items.length - MAX_ITEMS_PER_ROUND));
 
   // Never fall back to a cloud model: if judge_many fails, let the caller record the error and skip cloud scoring.
   const scores = await judgeFn(judgePath, items);

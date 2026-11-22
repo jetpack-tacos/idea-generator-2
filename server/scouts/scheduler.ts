@@ -60,7 +60,9 @@ export function createScoutScheduler(deps: {
       } catch (error: any) {
         const msg = error?.message ?? String(error);
         repo.recordScoutError('sessions', msg, now());
-        log(`[scouts] sessions failed: ${msg}`);
+        // Try again in an hour instead of waiting the full interval.
+        repo.retryScoutAt('sessions', now() - (settings.scoutIntervalsHours.sessions ?? 12) * HOUR + HOUR);
+        log(`[scouts] sessions failed, retry in an hour: ${msg}`);
       }
     }
 

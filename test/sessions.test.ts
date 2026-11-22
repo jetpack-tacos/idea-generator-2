@@ -7,7 +7,69 @@ import { openDb } from '../server/db.ts';
 import { createEngine } from '../server/engine.ts';
 import { DEFAULT_APP_SETTINGS } from '../server/providers.ts';
 import { createScoutScheduler } from '../server/scouts/scheduler.ts';
-import { fetchSessionWishes } from '../server/scouts/sessions.ts';
+import { MAX_ITEMS_PER_ROUND, extractUserMessageText, fetchSessionWishes } from '../server/scouts/sessions.ts';
+
+test('sessions scout skips app-written text and helper threads, and caps each round at the newest messages', async () => {
+  const typed = (text: string, extra: object = {}) => ({ type: 'user', entrypoint: 'claude-desktop', message: { role: 'user', content: text }, ...extra });
+  assert.equal(extractUserMessageText(typed('I wish the dishwasher told me when it finished.')), 'I wish the dishwasher told me when it finished.');
+  for (const row of [
+    typed('Stop hook feedback: I wish this check was quieter today.'),
+    typed('I wish a meta row was a wish.', { isMeta: true }),
+    typed('I wish helper threads counted.', { isSidechain: true }),
+    typed('Reply with only the word ok, I want a tool.', { entrypoint: 'sdk-cli' }),
+    typed('<system-reminder>Codebase and user instructions, I want this</system-reminder>'),
+    typed('<task-notification><task-id>x</task-id> I want a tool</task-notification>'),
+    typed('Base directory for this skill: C:/skills/x. I want a tool.'),
+    typed('Background (from the session that started this one): I want a tool.'),
+  ]) assert.equal(extractUserMessageText(row), null, JSON.stringify(row).slice(0, 80));
+  const mixed = { type: 'user', message: { role: 'user', content: [
+    { type: 'text', text: 'I wish the porch light knew sunset.' },
+    { type: 'text', text: '<system-reminder>private CLAUDE.md text</system-reminder>' },
+  ] } };
+  assert.equal(extractUserMessageText(mixed), 'I wish the porch light knew sunset.');
+  assert.equal(extractUserMessageText(typed('I wish this worked <system-reminder>private</system-reminder> every night.')), 'I wish this worked every night.');
+  assert.equal(extractUserMessageText(typed('[SCHEDULED TASK - AUTOMATED FIRING] I want a daily tool.')), null);
+  assert.equal(extractUserMessageText(typed('[Image: original 2568x444, displayed at 2000x346.]')), null);
+  assert.equal(
+    extractUserMessageText(typed('The user sent a new message while you were working: I wish the porch light knew sunset. This is how Claude Code surfaces messages the user sends mid-turn.')),
+    'I wish the porch light knew sunset.',
+  );
+
+  const dir = mkdtempSync(join(tmpdir(), 'ideagen-sessions-cap-'));
+  try {
+    const root = join(dir, 'projects');
+    mkdirSync(join(root, 'p', 'abc', 'subagents'), { recursive: true });
+    writeFileSync(join(root, 'p', 'abc', 'subagents', 'agent-1.jsonl'), JSON.stringify(typed('I wish subagent text was read.')) + '\n');
+    const older = join(root, 'p', 'older.jsonl');
+    writeFileSync(older, Array.from({ length: 50 }, (_, i) => JSON.stringify(typed(`older wish number ${i} for the house`))).join('\n') + '\n');
+    const hourAgo = new Date(Date.now() - 3_600_000);
+    utimesSync(older, hourAgo, hourAgo);
+    writeFileSync(join(root, 'p', 'newer.jsonl'), Array.from({ length: MAX_ITEMS_PER_ROUND }, (_, i) => JSON.stringify(typed(`newer wish number ${i} for the house`))).join('\n') + '\n');
+    let sent: { id: string; text: string }[] = [];
+    await fetchSessionWishes({
+      sessionsPath: root,
+      judgeManyPath: 'unused',
+      judgeSessions: async (_path, items) => { sent = items; return new Map(); },
+    });
+    assert.equal(sent.length, MAX_ITEMS_PER_ROUND);
+    assert.ok(sent.every((item) => item.text.startsWith('newer')), 'the newest messages are kept');
+
+    // A forked session repeats its parent's messages; each text is judged once.
+    const forkRoot = join(dir, 'forks');
+    mkdirSync(forkRoot);
+    for (const name of ['parent.jsonl', 'fork.jsonl']) {
+      writeFileSync(join(forkRoot, name), [typed('I wish the garage door told me it was open.'), typed(`only in ${name}, I want a tool`)].map((r) => JSON.stringify(r)).join('\n') + '\n');
+    }
+    await fetchSessionWishes({
+      sessionsPath: forkRoot,
+      judgeManyPath: 'unused',
+      judgeSessions: async (_path, items) => { sent = items; return new Map(); },
+    });
+    assert.equal(sent.length, 3);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('sessions scout reads recent user jsonl, calls judge_many WITHOUT --public, filters wish/personal, trims 300 chars, and never falls back to LLM', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ideagen-sessions-'));
@@ -96,6 +158,7 @@ with open(out_path, 'w', encoding='utf-8') as out:
     assert.equal(llmCalled, false);
     assert.equal(repo.latestFinds().length, 0);
     assert.ok(repo.listScoutRuns().find((r) => r.source === 'sessions')?.lastError, 'judge_many failure surfaces in scout_runs');
+    assert.equal(repo.listScoutRuns().find((r) => r.source === 'sessions')?.startedAt, now - 11 * 3_600_000, 'a failed sessions round retries in an hour');
 
     // And when judge_many succeeds via scheduler, finds are stored with score and never sent to LLM
     let t = now + 20 * 3_600_000;

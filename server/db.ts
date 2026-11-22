@@ -645,6 +645,10 @@ export function openDb(file: string) {
         ON CONFLICT(source) DO UPDATE SET last_error = excluded.last_error
       `).run(source, time, error.slice(0, 300));
     },
+    /** Move a source's last start back so its next round comes sooner than the full interval. */
+    retryScoutAt(source: string, startedAt: number) {
+      db.prepare('UPDATE scout_runs SET started_at = ? WHERE source = ?').run(startedAt, source);
+    },
     clearScoutError(source: string) {
       db.prepare('UPDATE scout_runs SET last_error = NULL WHERE source = ?').run(source);
     },
