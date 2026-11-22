@@ -13,7 +13,8 @@ The server runs TypeScript directly on Node 24.11.1 or newer. The frontend uses 
 - `server/providers.ts` routes DeepSeek, Z.ai, OpenRouter, Anthropic, and OpenAI. DeepSeek and Z.ai try a JSON Schema first and retry with JSON object mode plus the schema in the system prompt when a 400 rejects `response_format`. GLM uses low reasoning effort. DeepSeek uses peak rates for budget accounting.
 - `server/autopilot.ts` and `server/engine.ts` evolve automatic boards. The scheduler checks local active hours and recorded budgets before each step. `server/spend.ts` logs provider attempts, including retries.
 - `server/app.ts` validates the loopback Host header, requires JSON and a same-origin Origin header when present on writes, and publishes board changes over SSE.
-- `server/leads.ts` contains the Hugging Face research scout and optional OpenRouter X scout. The X scout has no default model and keeps only cited posts.
+- `server/scouts/` runs the six public scouts independently of autopilot. The scheduler persists source cadence and a 90-day seen list, tries the local Python judge first, and seeds eligible automatic boards. `npm run scouts:once` checks the six sources without writing to the database.
+- `server/leads.ts` contains the manual Hugging Face research workflow and optional OpenRouter X scout. The X scout has no default model and keeps only cited posts.
 - `server/project.ts` creates uniquely named project folders. Gold folders include the request stub and jury and source notes.
 - `public/js/app.js` and `public/js/report.js` render the English interface. Model text goes into the DOM as text nodes.
 

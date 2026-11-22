@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import defaults from '../settings.example.json' with { type: 'json' };
+import type { ScoutSource } from './scouts/sources.ts';
 
 export type ProviderId = 'openrouter' | 'anthropic' | 'openai' | 'deepseek' | 'zai';
 export type Role = 'distill' | 'expand' | 'combine' | 'judge' | 'summary' | 'research' | 'x' | 'brief';
@@ -11,6 +12,11 @@ export type AppSettings = {
   /** Safety net across all boards, in USD per local calendar day. */
   maxUsdPerDay: number;
   activeHours: { start: string; end: string };
+  scoutIntervalsHours: Record<ScoutSource, number>;
+  judgeManyPath: string;
+  interests: string;
+  seedThreshold: number;
+  seedsPerRound: number;
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = defaults;
@@ -218,7 +224,7 @@ async function openaiChat(p: ProviderId, model: string, r: ChatRequest, baseUrls
 const anthropicClients = new Map<string, Anthropic>();
 function anthropicClient(key: string | undefined) {
   const id = key ?? '(default)';
-  if (!anthropicClients.has(id)) anthropicClients.set(id, key ? new Anthropic({ apiKey: key, maxRetries: 0 }) : new Anthropic({ maxRetries: 0 }));
+  if (!anthropicClients.has(id)) anthropicClients.set(id, key ? new Anthropic({ apiKey: key, maxRetries: 0, timeout: 120_000 }) : new Anthropic({ maxRetries: 0, timeout: 120_000 }));
   return anthropicClients.get(id)!;
 }
 

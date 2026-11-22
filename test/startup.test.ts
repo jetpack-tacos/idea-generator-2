@@ -57,12 +57,15 @@ test('startup loads disk settings, waits overnight, then judges and budgets with
   await once(provider, 'listening');
 
   let now = Date.parse('2026-11-22T08:59:00');
+  let scoutRuns = 0;
   const service = startServer({
     port: 0, dbFile, settingsFile, spendFile, now: () => now,
+    scoutSources: { hackernews: async () => { scoutRuns++; return []; } },
     baseUrls: { zai: `http://127.0.0.1:${(provider.address() as any).port}` },
   });
   t.after(async () => {
     service.autopilot.stop();
+    await service.scoutScheduler.stop();
     await new Promise<void>((resolve) => service.server.close(() => resolve()));
     await new Promise<void>((resolve) => provider.close(() => resolve()));
     service.repo.close();
@@ -83,6 +86,10 @@ test('startup loads disk settings, waits overnight, then judges and budgets with
   assert.equal(calls.length, 0);
   now = Date.parse('2026-11-22T09:00:00');
   await waitFor('global_budget');
+  assert.equal(scoutRuns, 0);
+  now = Date.parse('2026-11-22T09:01:00');
+  await service.scoutScheduler.tick();
+  assert.equal(scoutRuns, 1);
   assert.equal(service.repo.getIdea(seed.id)?.reason, 'TEST verdict');
   const existing = service.repo.getIdea(oldIdea.id)!;
   assert.deepEqual([existing.originality, existing.feasibility, existing.impact, existing.reason], [3, 5, 4, 'TEST saved verdict']);
@@ -114,15 +121,22 @@ test('startup loads disk settings, waits overnight, then judges and budgets with
   }
   assert.equal((await put({ activeHours: { start: '22:00', end: '08:00' } })).status, 400);
   assert.equal((await put({ activeHours: { start: '08:00', end: '08:00' } })).status, 400);
+  assert.equal((await put({ scoutIntervalsHours: { hackernews: 0 } })).status, 400);
+  assert.equal((await put({ judgeManyPath: join(dir, 'test.py') })).status, 400);
   assert.equal((await put({
     activeHours: { start: '08:00', end: '21:00' }, projectsRoot: dir, maxUsdPerDay: 2,
     keys: { zai: 'secret-from-request' }, baseUrls: { zai: 'https://example.com' },
+    scoutIntervalsHours: { hackernews: 4 }, interests: 'TEST seedlings', seedThreshold: 0.7, seedsPerRound: 1,
   })).status, 200);
   const saved = readFileSync(settingsFile, 'utf8');
   assert.doesNotMatch(saved, /keys|baseUrls|secret-from-request|test-env-key/);
   assert.deepEqual(openSettings(settingsFile).get().activeHours, { start: '08:00', end: '21:00' });
   assert.equal(openSettings(settingsFile).get().projectsRoot, dir);
   assert.equal(openSettings(settingsFile).get().models.x, '');
-  assert.equal(openSettings(settingsFile).get().models.judge, 'zai:glm-5.3-flash');
+  const savedSettings = openSettings(settingsFile).get();
+  assert.equal(savedSettings.models.judge, 'zai:glm-5.3-flash');
+  assert.equal(savedSettings.scoutIntervalsHours.hackernews, 4);
+  assert.equal(savedSettings.scoutIntervalsHours.papers, 24);
+  assert.deepEqual([savedSettings.interests, savedSettings.seedThreshold, savedSettings.seedsPerRound], ['TEST seedlings', 0.7, 1]);
   assert.ok(!readdirSync(dir).some((name) => name.endsWith('.tmp')));
 });

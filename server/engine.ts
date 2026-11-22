@@ -5,11 +5,12 @@
 
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import type { Repo, Idea, Board } from './db.ts';
+import type { Repo, Idea, Board, StoredFind } from './db.ts';
 import { makeLLM } from './llm.ts';
 import { asUrl, fetchPage as realFetchPage } from './extract.ts';
 import { fetchPapers as realFetchPapers, researchLeads, xLeads } from './leads.ts';
 import { writeBrief, writeProject } from './project.ts';
+import { researchScores } from './scouts/filter.ts';
 import { ProviderError, type AppSettings, type ChatFn, type Role } from './providers.ts';
 import { fitness, isJudged, medal, scoreSum } from '../public/js/score.js';
 import { nextMove } from '../public/js/evolve.js';
@@ -97,6 +98,13 @@ export function createEngine(deps: Deps) {
   const modelFor = (board: Board, role: Role) => board.config.models[role] || deps.settings().models[role];
   const titles = (boardId: number) => repo.listIdeas(boardId).map((i) => i.title);
   const emitIdeas = (boardId: number, ideas: Idea[]) => ideas.length && bus.emit(boardId, { type: 'ideas', ideas });
+  const seedPosition = (boardId: number, at: { x?: number; y?: number }) =>
+    Number.isFinite(at.x) && Number.isFinite(at.y) ? { x: at.x!, y: at.y! } : besideBoard(repo.listIdeas(boardId));
+
+  function publishFinds() {
+    const finds = repo.latestFinds();
+    for (const board of repo.listBoards()) bus.emit(board.id, { type: 'finds', finds });
+  }
 
   async function call<T>(boardId: number, role: Role, fn: (llm: ReturnType<typeof makeLLM>, chat: ChatFn) => Promise<T>): Promise<T> {
     const chat: ChatFn = async (request) => {
@@ -345,7 +353,7 @@ export function createEngine(deps: Deps) {
       const goal = (idea.pitch ? `${idea.title}: ${idea.pitch}` : idea.title).slice(0, 600);
       const board = repo.createBoard({ title: idea.title.slice(0, 120), goal, config: { ...parent.config, mode: 'manual' }, originIdeaId: idea.id });
       const root = repo.insertIdea({
-        boardId: board.id, title: idea.title, pitch: idea.pitch, kind: 'seed', sourceUrl: idea.sourceUrl,
+        boardId: board.id, title: idea.title, pitch: idea.pitch, kind: 'seed', sourceUrl: idea.sourceUrl, seedSource: idea.seedSource,
         x: 0, y: 0, generation: 0, originIdeaId: idea.id, originBoardId: idea.boardId,
       });
       bus.emit(parent.id, { type: 'spinoff', ideaId: idea.id, boardId: board.id, title: board.title });
@@ -422,16 +430,37 @@ export function createEngine(deps: Deps) {
     seedLead(leadId: number, at: { x?: number; y?: number }) {
       const lead = repo.getLead(leadId);
       if (!lead) throw new AppError(404, 'not_found', 'Lead not found');
-      const pos = Number.isFinite(at.x) && Number.isFinite(at.y) ? { x: at.x!, y: at.y! } : besideBoard(repo.listIdeas(lead.boardId));
+      const pos = seedPosition(lead.boardId, at);
       const idea = repo.insertIdea({
         boardId: lead.boardId, title: lead.title, pitch: [lead.summary, lead.hook].filter(Boolean).join(' ').slice(0, 600),
-        kind: 'seed', sourceUrl: lead.url, x: pos.x, y: pos.y, generation: 0,
+        kind: 'seed', sourceUrl: lead.url, seedSource: lead.source === 'research' ? 'papers' : lead.source,
+        ...pos, generation: 0,
       });
       const used = repo.markLeadUsed(lead.id, idea.id)!;
       emitIdeas(lead.boardId, [idea]);
       bus.emit(lead.boardId, { type: 'leads', source: lead.source, leads: repo.listLeads(lead.boardId).filter((l) => l.source === lead.source) });
       queueJudge([idea.id]);
       return { idea, lead: used };
+    },
+
+    publishFinds,
+
+    scoreFinds(board: Board | undefined, context: string, finds: StoredFind[]) {
+      const model = board ? modelFor(board, 'research') : deps.settings().models.research;
+      return call(board?.id ?? 0, 'research', (_llm, chat) => researchScores(chat, model, context, finds));
+    },
+
+    seedFind(boardId: number, id: number, at: { x?: number; y?: number }, manual = true) {
+      mustBoard(boardId);
+      if (!repo.getFind(id)) throw new AppError(404, 'not_found', 'Find not found');
+      const result = repo.seedFind(boardId, id, seedPosition(boardId, at));
+      if (!result) throw new AppError(409, 'already_seeded', 'This find has already been seeded');
+      emitIdeas(boardId, [result.idea]);
+      if (manual) {
+        publishFinds();
+        queueJudge([result.idea.id]);
+      }
+      return result;
     },
 
     /**

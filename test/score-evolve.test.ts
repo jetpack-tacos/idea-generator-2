@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clampScore, fitness, medal, medalFromSum, scoreSum } from '../public/js/score.js';
+import { clampScore, fitness, medal, medalFromSum } from '../public/js/score.js';
 import { evolutionStats, expandedIds, nextMove, pairKey, usedPairs } from '../public/js/evolve.js';
 
 const idea = (id: number, sum: number | null, extra: any = {}) => {
@@ -30,8 +30,21 @@ test('scores are clamped to whole numbers 1–5', () => {
   assert.deepEqual([0, 1, 2.6, 5, 9, 'x', null].map(clampScore), [1, 1, 3, 5, 5, 1, 1]);
 });
 
-test('the helper builds the sum it was asked for', () => {
-  for (let s = 3; s <= 15; s++) assert.equal(scoreSum(idea(1, s)), s);
+test('equal-fitness descendants prefer different seed sources; stronger and single-source pairs still breed', () => {
+  const seed = (id: number, seedSource: string) => idea(id, null, { kind: 'seed', generation: 0, seedSource });
+  const ideas = [seed(1, 'papers'), seed(2, 'papers'), seed(3, 'lobsters'), idea(4, 12), idea(5, 12), idea(6, 12)];
+  const edges = [{ from: 1, to: 4 }, { from: 2, to: 5 }, { from: 3, to: 6 }];
+  function choose() {
+    // Parent 4 wins the first tournament. Parents 5 and 6 enter the second.
+    const draws = [0.5, 0, 0, 0, 0, 0.9, 0];
+    return nextMove(ideas, edges, { rng: () => draws.shift()!, mutationRate: 0 });
+  }
+  assert.equal(choose()?.b?.id, 6);
+  ideas[5] = idea(6, 11);
+  assert.equal(choose()?.b?.id, 5);
+  ideas[5] = idea(6, 12);
+  ideas[2] = seed(3, 'papers');
+  assert.equal(choose()?.b?.id, 5);
 });
 
 test('a hand-set medal beats the judge, for display and for breeding', () => {

@@ -40,18 +40,21 @@ export function backoffMs(errors: number) {
   return errors > 0 ? Math.min(15 * 60_000, 30_000 * 2 ** (errors - 1)) : 0;
 }
 
-/** Pure: may this board take a step now? */
-export function rateCheck(i: RateInput): RateDecision {
-  const now = new Date(i.now);
-  const [startHour, startMinute] = i.activeHours.start.split(':').map(Number);
-  const [endHour, endMinute] = i.activeHours.end.split(':').map(Number);
+export function activeHoursUntil(time: number, hours: AppSettings['activeHours']): number | null {
+  const now = new Date(time);
+  const [startHour, startMinute] = hours.start.split(':').map(Number);
+  const [endHour, endMinute] = hours.end.split(':').map(Number);
   const start = new Date(now).setHours(startHour, startMinute, 0, 0);
   const end = new Date(now).setHours(endHour, endMinute, 0, 0);
-  if (i.now < start) return { ok: false, reason: 'night', until: start };
-  if (i.now >= end) {
-    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, startHour, startMinute);
-    return { ok: false, reason: 'night', until: tomorrow.getTime() };
-  }
+  if (time < start) return start;
+  if (time >= end) return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, startHour, startMinute).getTime();
+  return null;
+}
+
+/** Pure: may this board take a step now? */
+export function rateCheck(i: RateInput): RateDecision {
+  const until = activeHoursUntil(i.now, i.activeHours);
+  if (until !== null) return { ok: false, reason: 'night', until };
   const overBudget = (spent: number, limit: number) => spent > 0 && spent >= limit;
   if (overBudget(i.globalSpent, i.globalUsdPerDay)) return { ok: false, reason: 'global_budget', until: nextLocalMidnight(i.now) };
   if (overBudget(i.boardSpent, i.boardUsdPerDay)) return { ok: false, reason: 'board_budget', until: nextLocalMidnight(i.now) };

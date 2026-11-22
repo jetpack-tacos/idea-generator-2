@@ -1,0 +1,6 @@
+{
+  "googleNews": [
+    { "name": "Example hobby topic", "kind": "topics", "id": "made-up-hobby-topic-id" },
+    { "name": "Example workshop site", "kind": "site", "id": "workshop.example" }
+  ]
+}

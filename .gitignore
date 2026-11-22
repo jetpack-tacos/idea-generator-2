@@ -10,5 +10,6 @@ vault/
 # Demo video work files (large; not for the repo)
 demo/
 settings.local.json
+sources.local.json
 settings.local.json.*.tmp
 logs/spend.jsonl

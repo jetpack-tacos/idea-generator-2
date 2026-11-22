@@ -38,13 +38,46 @@ export function expandedIds(ideas, edges) {
   return out;
 }
 
-function tournament(pool, k, rng) {
+function tournament(pool, k, rng, tieBreak = () => false) {
   let best = null;
   for (let i = 0; i < k; i++) {
     const c = pool[Math.floor(rng() * pool.length)];
-    if (!best || fitness(c) > fitness(best)) best = c;
+    if (!best || fitness(c) > fitness(best) || (fitness(c) === fitness(best) && tieBreak(c, best))) best = c;
   }
   return best;
+}
+
+function lineageSources(ideas, edges) {
+  const byId = new Map(ideas.map((idea) => [idea.id, idea]));
+  const parents = new Map();
+  for (const { from, to } of edges) {
+    if (!parents.has(to)) parents.set(to, []);
+    parents.get(to).push(from);
+  }
+  const cache = new Map();
+  return function sourcesOf(id) {
+    if (cache.has(id)) return cache.get(id);
+    const sources = new Set();
+    const visited = new Set();
+    const stack = [id];
+    while (stack.length) {
+      const parentId = stack.pop();
+      if (visited.has(parentId)) continue;
+      visited.add(parentId);
+      const ancestor = byId.get(parentId);
+      if (ancestor?.kind === 'seed' && ancestor.generation === 0 && ancestor.seedSource) {
+        sources.add(ancestor.seedSource);
+      }
+      for (const parent of parents.get(parentId) ?? []) stack.push(parent);
+    }
+    cache.set(id, sources);
+    return sources;
+  };
+}
+
+function crossesSources(a, b) {
+  if (!a.size || !b.size) return false;
+  return a.size > 1 || b.size > 1 || a.values().next().value !== b.values().next().value;
 }
 
 /**
@@ -69,10 +102,13 @@ export function nextMove(ideas, edges, opts = {}) {
   }
 
   if (pool.length >= 2) {
+    const sourcesOf = lineageSources(ideas, edges);
     for (let attempt = 0; attempt < 40; attempt++) {
       const a = tournament(pool, k, rng);
       const rest = pool.filter((i) => i.id !== a.id);
-      const b = tournament(rest, k, rng);
+      const aSources = sourcesOf(a.id);
+      const crosses = (idea) => crossesSources(aSources, sourcesOf(idea.id));
+      const b = tournament(rest, k, rng, (candidate, best) => crosses(candidate) && !crosses(best));
       const key = pairKey(a.id, b.id);
       if (used.has(key) || inFlight.has(key)) continue;
       return { type: 'combine', a, b };

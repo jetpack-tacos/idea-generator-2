@@ -46,6 +46,8 @@ const LABELS = {
   leadsDropped: '{n} leads without a verified source were dropped', leadsNone: 'No verified leads found this time',
   researcherOff: 'This scout is switched off in the board settings.',
   dragLead: 'Drag onto the board or click + Seed',
+  findsEmpty: 'No finds from this source yet.', findUnscored: 'Unscored',
+  findScore: 'Fit {n}', findSeeded: 'Seeded', findSource: 'Open source ↗',
   ap_manual: 'Manual', ap_running: 'Working …', ap_pace: 'Next step in {s}', ap_hourly: 'Hourly limit reached · resumes {time}',
   ap_board_budget: 'Daily budget spent · resumes tomorrow', ap_global_budget: 'Global daily budget spent · resumes tomorrow',
   ap_backoff: 'Error · retrying in {s}', ap_error: 'Error: {m}', ap_idle: 'Waiting', ap_idle_empty: 'Waiting for a seed',

@@ -666,14 +666,15 @@ export class Graph {
 
     // Leads dragged in from the scouting panel.
     c.addEventListener('dragover', (e) => {
-      if (e.dataTransfer?.types.includes('text/x-lead')) e.preventDefault();
+      if (e.dataTransfer?.types.some((type) => type === 'text/x-lead' || type === 'text/x-find')) e.preventDefault();
     });
     c.addEventListener('drop', (e) => {
-      const id = Number(e.dataTransfer?.getData('text/x-lead'));
+      const find = e.dataTransfer?.getData('text/x-find');
+      const id = Number(find || e.dataTransfer?.getData('text/x-lead'));
       if (!id) return;
       e.preventDefault();
       const w = this.toWorld(e.clientX, e.clientY);
-      this.h.dropLead?.(id, w.x, w.y);
+      this.h.dropLead?.(id, w.x, w.y, Boolean(find));
     });
   }
 }

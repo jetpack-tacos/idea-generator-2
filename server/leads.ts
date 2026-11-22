@@ -10,9 +10,10 @@
 // useful for the goal and writes a hook for each.
 
 import type { ChatFn } from './llm.ts';
+import { paperUrl, type Paper } from './scouts/papers.ts';
+export { fetchPapers } from './scouts/papers.ts';
 
 export type LeadDraft = { title: string; summary: string; hook: string; url: string; meta: Record<string, unknown> };
-type Paper = { id: string; title: string; summary: string; published: string; upvotes: number };
 
 const DEFAULT_TOPIC = 'new technology, AI tools, and new ways people actually use them';
 
@@ -98,45 +99,6 @@ export async function xLeads(a: { chat: ChatFn; model: string; goal: string }) {
   return { leads, dropped: all.length - leads.length, costUsd: r.costUsd };
 }
 
-function toPaper(raw: any): Paper | null {
-  const p = raw?.paper ?? raw;
-  if (!p?.id || !p?.title) return null;
-  return {
-    id: String(p.id),
-    title: String(p.title).replace(/\s+/g, ' ').trim(),
-    summary: String(p.ai_summary || p.summary || raw.summary || '').replace(/\s+/g, ' ').trim(),
-    published: String(p.publishedAt || raw.publishedAt || ''),
-    upvotes: Number(p.upvotes) || 0,
-  };
-}
-
-export async function fetchPapers(goal: string, fetchFn: typeof fetch = fetch): Promise<Paper[]> {
-  const get = async (url: string) => {
-    const res = await fetchFn(url, { signal: AbortSignal.timeout(15_000), headers: { Accept: 'application/json' } });
-    if (!res.ok) throw new Error(`Hugging Face ${res.status}`);
-    const data = await res.json();
-    return Array.isArray(data) ? data : [];
-  };
-  const [daily, searched] = await Promise.all([
-    get('https://huggingface.co/api/daily_papers?limit=60').catch(() => []),
-    goal.trim()
-      ? get(`https://huggingface.co/api/papers/search?q=${encodeURIComponent(goal.trim().slice(0, 200))}&limit=30`).catch(() => [])
-      : Promise.resolve([]),
-  ]);
-  const yearAgo = Date.now() - 365 * 86_400_000;
-  const recent = (p: Paper) => !p.published || Date.parse(p.published) >= yearAgo;
-  const seen = new Set<string>();
-  const out: Paper[] = [];
-  // Goal matches first: they are what the scout should look at most closely.
-  for (const p of [...searched.map(toPaper).filter((p) => p && recent(p)), ...daily.map(toPaper)] as (Paper | null)[]) {
-    if (p && !seen.has(p.id)) {
-      seen.add(p.id);
-      out.push(p);
-    }
-  }
-  return out;
-}
-
 export async function researchLeads(a: { chat: ChatFn; model: string; goal: string; papers: Paper[] }) {
   if (!a.papers.length) throw new Error('Hugging Face returned no papers');
   const byId = new Map(a.papers.map((p) => [p.id, p]));
@@ -170,7 +132,7 @@ export async function researchLeads(a: { chat: ChatFn; model: string; goal: stri
       title: clean(l.title, 120) || p.title,
       summary: clean(l.summary, 400),
       hook: clean(l.hook, 300),
-      url: `https://huggingface.co/papers/${p.id}`,
+      url: paperUrl(p.id),
       meta: { paperId: p.id, paperTitle: p.title, published: p.published.slice(0, 10), upvotes: p.upvotes },
     });
   }

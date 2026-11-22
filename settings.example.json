@@ -14,5 +14,17 @@
   "activeHours": {
     "start": "08:00",
     "end": "22:00"
-  }
+  },
+  "scoutIntervalsHours": {
+    "github-trending": 6,
+    "github-new": 12,
+    "hackernews": 3,
+    "lobsters": 6,
+    "papers": 24,
+    "google-news": 6
+  },
+  "judgeManyPath": "",
+  "interests": "",
+  "seedThreshold": 0.6,
+  "seedsPerRound": 3
 }

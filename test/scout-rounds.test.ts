@@ -1,0 +1,128 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openDb } from '../server/db.ts';
+import { createEngine } from '../server/engine.ts';
+import { DEFAULT_APP_SETTINGS, type ChatFn } from '../server/providers.ts';
+import { createScoutScheduler } from '../server/scouts/scheduler.ts';
+import type { Find } from '../server/scouts/http.ts';
+
+const HOUR = 3_600_000;
+const start = new Date(2026, 10, 22, 8).getTime();
+const python = join(import.meta.dirname, 'fixtures/judge_many.py');
+const draft = (source: string, id: number, score = 0.9): Find => ({
+  source, externalId: String(id), title: `TEST find ${id} ${score}`, url: `https://example.test/${id}`, summary: 'TEST summary',
+});
+
+test('unattended rounds gate fetches, isolate failures, use one free batch and seed each automatic board', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ideagen-scouts-'));
+  const file = join(dir, 'test.db');
+  let repo = openDb(file);
+  const board1 = repo.createBoard({ title: 'TEST old auto', goal: 'TEST goal', config: { mode: 'auto' } });
+  const board2 = repo.createBoard({ title: 'TEST new auto', goal: 'TEST goal', config: { mode: 'auto' } });
+  const manual = repo.createBoard({ title: 'TEST manual' });
+  repo.addFinds([draft('hackernews', 999)], start - 91 * 24 * HOUR);
+  const settings = () => ({ ...DEFAULT_APP_SETTINGS, judgeManyPath: python, interests: 'TEST interests', seedsPerRound: 2 });
+  const chat: ChatFn = async () => assert.fail('No paid call for a successful free filter');
+  let now = start - 2 * 60_000 - 1;
+  const times: Record<string, number[]> = { hackernews: [], 'github-trending': [] };
+  const sources = {
+    hackernews: async () => {
+      times.hackernews.push(now);
+      return [draft('hackernews', 1, 0.7), draft('hackernews', 2, 0.95), draft('hackernews', 3, 0.5),
+        draft('hackernews', 4, 0.9), draft('hackernews', 5, 0.8), draft('hackernews', 1, 0.1)];
+    },
+    'github-trending': async () => {
+      times['github-trending'].push(now);
+      if (times['github-trending'].length === 1) throw new Error('TEST unavailable');
+      return [draft('github-trending', 2, 0.65)];
+    },
+  };
+  const logs: string[] = [];
+  const scheduler = () => {
+    const engine = createEngine({ repo, chat, settings, gitInit: false });
+    return { engine, scout: createScoutScheduler({ repo, engine, settings, now: () => now, sources, log: (line) => logs.push(line) }) };
+  };
+  let { engine, scout } = scheduler();
+  t.after(async () => {
+    await scout.stop();
+    repo.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const published: unknown[] = [];
+  engine.bus.on(manual.id, (event) => { if (event.type === 'finds') published.push(event.finds); });
+  scout.start();
+  now = start - 2;
+  await scout.tick();
+  now = start - 1;
+  await scout.tick();
+  assert.equal(times.hackernews.length, 0, 'the startup delay and active hours both apply');
+  now = start;
+  await Promise.all([scout.tick(), scout.tick()]);
+  assert.deepEqual(times, { hackernews: [start], 'github-trending': [start] });
+  assert.deepEqual(repo.listIdeas(board2.id).map((idea) => [idea.title, idea.kind, idea.sourceUrl, idea.seedSource]), [
+    ['TEST find 2 0.95', 'seed', 'https://example.test/2', 'hackernews'],
+    ['TEST find 4 0.9', 'seed', 'https://example.test/4', 'hackernews'],
+  ]);
+  assert.deepEqual(repo.listIdeas(board1.id).map((idea) => idea.title), ['TEST find 5 0.8', 'TEST find 1 0.7']);
+  assert.equal(repo.listIdeas(manual.id).length, 0);
+  assert.equal(repo.latestFinds().length, 5, 'duplicate and expired finds are absent');
+  assert.equal(repo.latestFinds().find((find) => find.externalId === '3')?.seededIdeaId, null);
+  assert.equal(published.length, 2, 'retention and completed round both reach the browser feed');
+  assert.equal(logs.filter((line) => line.includes('judge_many filter for')).length, 1);
+  assert.match(logs.join('\n'), /github-trending failed, retry on its next round: TEST unavailable/);
+  const seeded = repo.listIdeas(board2.id)[0];
+  repo.deleteIdea(seeded.id);
+  assert.throws(() => engine.seedFind(board2.id, repo.latestFinds().find((find) => find.seededIdeaId === seeded.id)!.id, {}), { code: 'already_seeded' });
+
+  await scout.stop();
+  repo.close();
+  repo = openDb(file);
+  ({ engine, scout } = scheduler());
+  scout.start();
+  now = start + 3 * HOUR - 1;
+  await scout.tick();
+  assert.equal(times.hackernews.length, 1, 'a restart does not reset the last hit');
+  now++;
+  await scout.tick();
+  assert.equal(logs.filter((line) => line.includes('judge_many filter for')).length, 1, 'seen finds are never sent to the filter again');
+  now = start + 6 * HOUR;
+  await scout.tick();
+  assert.deepEqual(times, { hackernews: [start, start + 3 * HOUR, now], 'github-trending': [start, now] });
+  assert.equal(repo.latestFinds().filter((find) => find.externalId === '2').length, 2, 'deduplication is per source');
+  assert.equal(repo.latestFinds().find((find) => find.source === 'github-trending')?.score, 0.65);
+});
+
+test('a failed Python filter falls back in batches of ten through the board research model', async (t) => {
+  const repo = openDb(':memory:');
+  const board = repo.createBoard({ title: 'TEST fallback', goal: 'TEST goal', config: { mode: 'auto', models: { research: 'deepseek:deepseek-flash' } } });
+  let now = start;
+  const settings = () => ({
+    ...DEFAULT_APP_SETTINGS, judgeManyPath: python, interests: 'TEST interests TEST force failure',
+  });
+  const batches: number[] = [];
+  const chat: ChatFn = async (req) => {
+    assert.equal(req.schemaName, 'scout_fit');
+    assert.equal(req.boardId, board.id);
+    assert.equal(req.model, 'deepseek:deepseek-flash');
+    assert.equal(req.role, 'research');
+    const { context, items } = JSON.parse(req.user);
+    assert.match(context, /TEST goal[\s\S]+TEST interests/);
+    batches.push(items.length);
+    return { costUsd: 0.01, value: { scores: items.map(({ id }: { id: string }) => ({ id, fit: 0.4 })) } };
+  };
+  const logs: string[] = [];
+  const engine = createEngine({ repo, chat, settings });
+  const scout = createScoutScheduler({ repo, engine, settings, now: () => now, log: (line) => logs.push(line),
+    sources: { hackernews: async () => Array.from({ length: 21 }, (_, i) => draft('hackernews', i)) } });
+  t.after(async () => { await scout.stop(); repo.close(); });
+  scout.start();
+  now += 120_000;
+  await scout.tick();
+  assert.deepEqual(batches, [10, 10, 1]);
+  assert.equal(repo.spentTotal().calls, 3);
+  assert.ok(repo.latestFinds().every((find) => find.score === 0.4 && find.seededIdeaId === null));
+  assert.match(logs.join('\n'), /judge_many filter failed: judge_many failed \(3\)[\s\S]+research model filter for 21 new finds/);
+});

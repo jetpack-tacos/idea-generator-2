@@ -5,6 +5,7 @@ import { openDb } from './db.ts';
 import { makeChat } from './providers.ts';
 import { createEngine } from './engine.ts';
 import { createAutopilot } from './autopilot.ts';
+import { createScoutScheduler } from './scouts/scheduler.ts';
 import { createHandler } from './app.ts';
 import { openSettings } from './settings.ts';
 import { SPEND_FILE, spendLogger } from './spend.ts';
@@ -18,6 +19,7 @@ export function startServer({
   spendFile = SPEND_FILE,
   baseUrls,
   now,
+  scoutSources,
 }: {
   port?: number;
   dbFile?: string;
@@ -25,16 +27,24 @@ export function startServer({
   spendFile?: string;
   baseUrls?: NonNullable<Parameters<typeof makeChat>[0]>['baseUrls'];
   now?: () => number;
+  scoutSources?: Parameters<typeof createScoutScheduler>[0]['sources'];
 } = {}) {
   const runtime = openSettings(settingsFile);
   if (dbFile !== ':memory:') mkdirSync(dirname(dbFile), { recursive: true });
   const repo = openDb(dbFile);
   const engine = createEngine({ repo, chat: makeChat({ baseUrls, log: spendLogger(spendFile) }), settings: runtime.get });
   const autopilot = createAutopilot({ repo, engine, settings: runtime.get, now });
+  const scoutScheduler = createScoutScheduler({ repo, engine, settings: runtime.get, now, sources: scoutSources });
   const server = createServer(createHandler({ repo, engine, autopilot, runtime, publicDir: join(root, 'public') }));
-  server.once('listening', () => autopilot.start());
-  server.once('close', () => autopilot.stop());
-  return { server: server.listen(port, '127.0.0.1'), repo, engine, autopilot };
+  server.once('listening', () => {
+    autopilot.start();
+    scoutScheduler.start();
+  });
+  server.once('close', () => {
+    autopilot.stop();
+    void scoutScheduler.stop();
+  });
+  return { server: server.listen(port, '127.0.0.1'), repo, engine, autopilot, scoutScheduler };
 }
 
 if (import.meta.main) {

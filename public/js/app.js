@@ -11,9 +11,9 @@ import { openReport } from './report.js';
 
 const MEDAL_ICON = ['–', '🥉', '🥈', '🥇'];
 const S = {
-  boards: [], board: null, ideas: new Map(), edges: [], leads: [], spinoffs: [], judging: new Set(),
+  boards: [], board: null, ideas: new Map(), edges: [], leads: [], finds: [], spinoffs: [], judging: new Set(),
   autopilot: { state: 'manual' }, spentToday: 0, selected: null, templates: [], providers: null,
-  settings: null, stopFollow: null, createAt: null, leadsTab: 'research', refreshing: {},
+  settings: null, stopFollow: null, createAt: null, leadsTab: 'github-trending', refreshing: {},
 };
 const fail = (e) => toast(errorText(e), 'error', 8000);
 const ideaList = () => [...S.ideas.values()];
@@ -44,7 +44,7 @@ const graph = new Graph($('#canvas'), {
     $('#seed-input').focus();
   },
   moved: debounce(() => savePositions(), 1200),
-  dropLead: (id, x, y) => seedLead(id, x, y),
+  dropLead: seedLead,
 });
 // ?debug exposes the canvas for scripted demos and tests (node positions, camera).
 if (new URLSearchParams(location.search).has('debug')) window.ideagen = { graph, state: () => S };
@@ -79,6 +79,7 @@ async function openBoard(id) {
   S.ideas = new Map(data.ideas.map((i) => [i.id, i]));
   S.edges = data.edges;
   S.leads = data.leads;
+  S.finds = data.finds;
   S.spinoffs = data.spinoffs;
   S.judging = new Set(data.judging);
   S.autopilot = data.autopilot;
@@ -130,6 +131,10 @@ function onEvent(e) {
       S.board = e.board;
       renderHeader();
       renderPanelSoon();
+      renderLeads();
+      break;
+    case 'finds':
+      S.finds = e.finds;
       renderLeads();
       break;
     case 'leads':
@@ -216,9 +221,10 @@ async function combine(a, b) {
   }
 }
 
-async function seedLead(id, x, y) {
+async function seedLead(id, x, y, find = false) {
   try {
-    const r = await api('POST', `/api/leads/${id}/seed`, x == null ? {} : { x, y });
+    const route = find ? `/api/boards/${S.board.id}/finds/${id}/seed` : `/api/leads/${id}/seed`;
+    const r = await api('POST', route, x == null ? {} : { x, y });
     S.ideas.set(r.idea.id, r.idea);
     graph.upsert(r.idea);
     graph.focusOn(r.idea.id, null);
@@ -523,43 +529,65 @@ async function summarize(btn) {
 
 // ================================================================ leads panel
 
+const scoutLabels = {
+  'github-trending': 'GitHub Trending',
+  'github-new': 'New on GitHub',
+  hackernews: 'Hacker News',
+  lobsters: 'Lobsters',
+  papers: 'Papers',
+  'google-news': 'Google News',
+};
+
 function renderLeads() {
   const root = $('#leads-panel');
   if (!S.board || root.hidden) return;
   const xConfigured = Boolean(S.board.config.models.x || S.settings?.models.x);
-  if (!xConfigured) S.leadsTab = 'research';
+  if (!xConfigured && S.leadsTab === 'x') S.leadsTab = 'github-trending';
   const src = S.leadsTab;
+  const isFind = Object.hasOwn(scoutLabels, src);
   const cfg = S.board.config.researchers[src];
   const busy = S.refreshing[src];
-  const list = S.leads.filter((l) => l.source === src);
-  const tab = (id, label) => h('button', { class: `tab ${src === id ? 'on' : ''}`, role: 'tab', 'aria-selected': String(src === id), onclick: () => { S.leadsTab = id; renderLeads(); } }, label);
+  const list = (isFind ? S.finds : S.leads).filter((l) => l.source === src);
+  const tab = (id, label) => h('button', {
+    class: `tab ${src === id ? 'on' : ''}`, role: 'tab', 'aria-selected': String(src === id),
+    onclick: () => { S.leadsTab = id; renderLeads(); },
+  }, label);
   clear(root,
-    h('div', { class: 'tabs', role: 'tablist' }, xConfigured ? tab('x', t('leadsX')) : null, tab('research', t('leadsResearch'))),
-    !cfg.enabled
-      ? h('p', { class: 'muted' }, t('researcherOff'))
-      : [
+    h('div', { class: 'tabs lead-tabs', role: 'tablist', 'aria-label': 'Lead sources' },
+      Object.entries(scoutLabels).map(([id, label]) => tab(id, label)),
+      tab('research', t('leadsResearch')), xConfigured ? tab('x', t('leadsX')) : null,
+    ),
+    cfg && !cfg.enabled ? h('p', { class: 'muted' }, t('researcherOff')) : [
+      cfg ? h('div', { class: 'row space' },
+        h('span', { class: 'muted small' }, S.board.goal ? `${t('goal')}: ${S.board.goal}${cfg.focus ? ` — ${cfg.focus}` : ''}` : t('noGoal')),
+        h('button', { class: 'btn small', disabled: !!busy, onclick: () => refreshLeads(src) },
+          busy ? `${t('refreshing')} ${Math.round((Date.now() - busy) / 1000)} s` : t('refresh')),
+      ) : null,
+      list.length
+        ? list.some((l) => !(isFind ? l.seededIdeaId : l.ideaId)) ? h('p', { class: 'muted small' }, t('dragLead')) : null
+        : h('p', { class: 'muted' }, t(isFind ? 'findsEmpty' : 'leadsEmpty')),
+      list.map((l) => {
+        const seeded = isFind ? l.seededIdeaId : l.ideaId;
+        return h('article', {
+          class: `lead ${seeded ? 'used' : ''}`, draggable: seeded ? null : 'true',
+          ondragstart: seeded ? null : (e) => {
+            e.dataTransfer.setData(isFind ? 'text/x-find' : 'text/x-lead', String(l.id));
+            e.dataTransfer.effectAllowed = 'copy';
+          },
+        },
+          h('h4', {}, l.title),
+          l.summary ? h('p', {}, l.summary) : null,
+          l.hook ? h('p', { class: 'hook' }, `→ ${l.hook}`) : null,
+          isFind ? h('p', { class: 'small muted' }, l.score === null ? t('findUnscored') : t('findScore', { n: l.score.toFixed(2) })) : null,
           h('div', { class: 'row space' },
-            h('span', { class: 'muted small' }, S.board.goal ? `${t('goal')}: ${S.board.goal}${cfg.focus ? ` — ${cfg.focus}` : ''}` : t('noGoal')),
-            h('button', { class: 'btn small', disabled: !!busy, onclick: () => refreshLeads(src) },
-              busy ? `${t('refreshing')} ${Math.round((Date.now() - busy) / 1000)} s` : t('refresh')),
+            l.url ? h('a', { href: l.url, target: '_blank', rel: 'noopener noreferrer', class: 'small' },
+              isFind ? t('findSource') : src === 'x' ? 'x.com ↗' : `${l.meta?.published ?? ''} ↗`) : h('span'),
+            seeded ? h('span', { class: 'muted small' }, `✓ ${t(isFind ? 'findSeeded' : 'onBoard')}`)
+              : h('button', { class: 'btn small', onclick: () => seedLead(l.id, undefined, undefined, isFind) }, t('addAsSeed')),
           ),
-          !list.length ? h('p', { class: 'muted' }, t('leadsEmpty')) : h('p', { class: 'muted small' }, t('dragLead')),
-          list.map((l) =>
-            h('article', {
-              class: `lead ${l.ideaId ? 'used' : ''}`, draggable: l.ideaId ? null : 'true',
-              ondragstart: (e) => { e.dataTransfer.setData('text/x-lead', String(l.id)); e.dataTransfer.effectAllowed = 'copy'; },
-            },
-              h('h4', {}, l.title),
-              l.summary ? h('p', {}, l.summary) : null,
-              l.hook ? h('p', { class: 'hook' }, `→ ${l.hook}`) : null,
-              h('div', { class: 'row space' },
-                l.url ? h('a', { href: l.url, target: '_blank', rel: 'noopener noreferrer', class: 'small' },
-                  src === 'x' ? 'x.com ↗' : `${l.meta?.published ?? ''} ↗`) : h('span'),
-                l.ideaId ? h('span', { class: 'muted small' }, `✓ ${t('onBoard')}`) : h('button', { class: 'btn small', onclick: () => seedLead(l.id) }, t('addAsSeed')),
-              ),
-            ),
-          ),
-        ],
+        );
+      }),
+    ],
   );
 }
 

@@ -168,6 +168,9 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir }: D
     ['PUT', /^\/api\/runtime-settings$/, (_p, b) => {
       let next: AppSettings;
       try {
+        if (b?.judgeManyPath !== undefined && b.judgeManyPath !== runtime.get().judgeManyPath) {
+          throw new Error('Set judgeManyPath in settings.local.json');
+        }
         next = mergeAppSettings(b, runtime.get());
       } catch (error: any) {
         throw new AppError(400, 'bad_settings', error.message);
@@ -204,6 +207,7 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir }: D
         board, ideas,
         edges: repo.listEdges(board.id),
         leads: repo.listLeads(board.id),
+        finds: repo.latestFinds(),
         spinoffs: repo.spinoffs(board.id),
         judging: ideas.filter((i) => engine.judging.has(i.id)).map((i) => i.id),
         autopilot: autopilot.status(board.id),
@@ -248,6 +252,7 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir }: D
     ['POST', /^\/api\/ideas\/(\d+)\/spinoff$/, ([id]) => engine.spinoff(+id)],
 
     // ---- leads
+    ['POST', /^\/api\/boards\/(\d+)\/finds\/(\d+)\/seed$/, ([boardId, id], b) => engine.seedFind(+boardId, +id, b)],
     ['POST', /^\/api\/boards\/(\d+)\/leads\/(x|research)$/, ([id, source]) => engine.refreshLeads(+id, source as 'x' | 'research')],
     ['POST', /^\/api\/leads\/(\d+)\/seed$/, ([id], b) => engine.seedLead(+id, b)],
     ['DELETE', /^\/api\/leads\/(\d+)$/, ([id]) => ({ ok: repo.deleteLead(+id) })],

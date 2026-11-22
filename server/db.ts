@@ -5,6 +5,7 @@
 // a new board's flow; editing a board never changes another board.
 import { DatabaseSync } from 'node:sqlite';
 import { parseModel, ROLES, type Role } from './providers.ts';
+import type { Find } from './scouts/http.ts';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS templates (
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS ideas (
   pitch TEXT NOT NULL DEFAULT '',
   kind TEXT NOT NULL CHECK (kind IN ('seed', 'expand', 'combine')),
   source_url TEXT,
+  seed_source TEXT,
   x REAL NOT NULL DEFAULT 0,
   y REAL NOT NULL DEFAULT 0,
   originality INTEGER,
@@ -67,6 +69,26 @@ CREATE TABLE IF NOT EXISTS leads (
   fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS leads_board ON leads(board_id);
+CREATE TABLE IF NOT EXISTS finds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  url TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  first_seen INTEGER NOT NULL,
+  score REAL CHECK (score BETWEEN 0 AND 1),
+  -- Keep the original ID as a seeded marker even if its idea is deleted.
+  seeded_idea_id INTEGER,
+  UNIQUE (source, external_id)
+);
+CREATE INDEX IF NOT EXISTS finds_recent ON finds(source, first_seen DESC, id DESC);
+CREATE INDEX IF NOT EXISTS finds_age ON finds(first_seen);
+CREATE INDEX IF NOT EXISTS finds_seedable ON finds(score DESC, id) WHERE seeded_idea_id IS NULL;
+CREATE TABLE IF NOT EXISTS scout_runs (
+  source TEXT PRIMARY KEY,
+  started_at INTEGER NOT NULL
+);
 -- Keywords come from the judge, in one canonical form, so trends can be counted across boards.
 CREATE TABLE IF NOT EXISTS idea_keywords (
   idea_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
@@ -226,6 +248,7 @@ export type Idea = {
   pitch: string;
   kind: 'seed' | 'expand' | 'combine';
   sourceUrl: string | null;
+  seedSource: string | null;
   x: number;
   y: number;
   originality: number | null;
@@ -264,6 +287,13 @@ export type Lead = {
   url: string | null; meta: Record<string, unknown>; ideaId: number | null; fetchedAt: string;
 };
 
+export type StoredFind = Omit<Find, 'publishedAt'> & { id: number; firstSeen: number; score: number | null; seededIdeaId: number | null };
+
+const findFromRow = (r: any): StoredFind => ({
+  id: r.id, source: r.source, externalId: r.external_id, title: r.title, url: r.url, summary: r.summary,
+  firstSeen: r.first_seen, score: r.score, seededIdeaId: r.seeded_idea_id,
+});
+
 const IDEA_SELECT = `SELECT i.*, ob.title AS origin_board_title,
   (SELECT group_concat(keyword, '|') FROM (SELECT keyword FROM idea_keywords k WHERE k.idea_id = i.id ORDER BY keyword)) AS keywords
   FROM ideas i LEFT JOIN boards ob ON ob.id = i.origin_board_id`;
@@ -275,6 +305,7 @@ const ideaFromRow = (r: any): Idea => ({
   pitch: r.pitch,
   kind: r.kind === 'expand' || r.kind === 'combine' ? r.kind : 'seed',
   sourceUrl: r.source_url,
+  seedSource: r.seed_source,
   x: r.x,
   y: r.y,
   originality: r.originality,
@@ -358,6 +389,32 @@ export function openDb(file: string) {
     }
   };
 
+  if (!db.prepare('PRAGMA table_info(ideas)').all().some((column) => column.name === 'seed_source')) {
+    tx(() => {
+      db.exec(`ALTER TABLE ideas ADD COLUMN seed_source TEXT;
+        UPDATE ideas SET seed_source = (
+          SELECT CASE source WHEN 'research' THEN 'papers' ELSE source END
+          FROM leads WHERE idea_id = ideas.id ORDER BY id DESC LIMIT 1
+        ) WHERE kind = 'seed';`);
+    });
+  }
+
+  function insertIdeaRow(i: {
+    boardId: number; title: string; pitch: string; kind: Idea['kind']; sourceUrl?: string | null; seedSource?: string | null;
+    x: number; y: number; generation: number; originIdeaId?: number | null; originBoardId?: number | null;
+  }, parentIds: number[]): Idea {
+    const { lastInsertRowid } = db.prepare(
+      `INSERT INTO ideas (board_id, title, pitch, kind, source_url, seed_source, x, y, generation, origin_idea_id, origin_board_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(i.boardId, i.title, i.pitch, i.kind, i.sourceUrl ?? null, i.seedSource ?? null, i.x, i.y, i.generation,
+      i.originIdeaId ?? null, i.originBoardId ?? null);
+    const id = Number(lastInsertRowid);
+    const edge = db.prepare('INSERT OR IGNORE INTO edges (board_id, from_id, to_id) VALUES (?, ?, ?)');
+    for (const p of parentIds) edge.run(i.boardId, p, id);
+    repo.touchBoard(i.boardId);
+    return repo.getIdea(id)!;
+  }
+
   const repo = {
     close: () => db.close(),
 
@@ -424,26 +481,8 @@ export function openDb(file: string) {
       return r ? ideaFromRow(r) : null;
     },
     /** Insert an idea and the edges from its parents in one transaction. */
-    insertIdea(
-      i: {
-        boardId: number; title: string; pitch: string; kind: Idea['kind']; sourceUrl?: string | null;
-        x: number; y: number; generation: number; originIdeaId?: number | null; originBoardId?: number | null;
-      },
-      parentIds: number[] = [],
-    ): Idea {
-      return tx(() => {
-        const { lastInsertRowid } = db
-          .prepare(
-            `INSERT INTO ideas (board_id, title, pitch, kind, source_url, x, y, generation, origin_idea_id, origin_board_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(i.boardId, i.title, i.pitch, i.kind, i.sourceUrl ?? null, i.x, i.y, i.generation, i.originIdeaId ?? null, i.originBoardId ?? null);
-        const id = Number(lastInsertRowid);
-        const edge = db.prepare('INSERT OR IGNORE INTO edges (board_id, from_id, to_id) VALUES (?, ?, ?)');
-        for (const p of parentIds) edge.run(i.boardId, p, id);
-        repo.touchBoard(i.boardId);
-        return repo.getIdea(id)!;
-      });
+    insertIdea(i: Parameters<typeof insertIdeaRow>[0], parentIds: number[] = []): Idea {
+      return tx(() => insertIdeaRow(i, parentIds));
     },
     saveJudgement(id: number, j: { originality: number; feasibility: number; impact: number; reason: string }) {
       db.prepare(
@@ -518,6 +557,67 @@ export function openDb(file: string) {
         }
       }
       return out.slice(0, max);
+    },
+
+    // ---- scouts
+    claimScout(source: string, time: number, interval: number) {
+      return db.prepare(`
+        INSERT INTO scout_runs (source, started_at) VALUES (?, ?)
+        ON CONFLICT(source) DO UPDATE SET started_at = excluded.started_at WHERE started_at <= ?
+      `).run(source, time, time - interval).changes > 0;
+    },
+    addFinds(drafts: Find[], time: number): StoredFind[] {
+      const insert = db.prepare(`
+        INSERT INTO finds (source, external_id, title, url, summary, first_seen) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source, external_id) DO NOTHING RETURNING *
+      `);
+      return tx(() => {
+        const added: StoredFind[] = [];
+        for (const draft of drafts) {
+          if (!draft.externalId || !draft.title || !/^https?:\/\//i.test(draft.url)) continue;
+          const row = insert.get(draft.source, draft.externalId, draft.title, draft.url, draft.summary.slice(0, 1200), time);
+          if (row) added.push(findFromRow(row));
+        }
+        return added;
+      });
+    },
+    getFind(id: number): StoredFind | null {
+      const row = db.prepare('SELECT * FROM finds WHERE id = ?').get(id);
+      return row ? findFromRow(row) : null;
+    },
+    latestFinds(): StoredFind[] {
+      return db.prepare(`
+        SELECT * FROM (
+          SELECT finds.*, ROW_NUMBER() OVER (PARTITION BY source ORDER BY first_seen DESC, id DESC) AS rank
+          FROM finds
+        ) WHERE rank <= 30 ORDER BY source, first_seen DESC, id DESC
+      `).all().map(findFromRow);
+    },
+    saveFindScores(scores: Map<number, number>) {
+      const update = db.prepare('UPDATE finds SET score = ? WHERE id = ? AND score IS NULL');
+      tx(() => {
+        for (const [id, score] of scores) update.run(score, id);
+      });
+    },
+    pruneFinds(cutoff: number) {
+      return db.prepare('DELETE FROM finds WHERE first_seen <= ?').run(cutoff).changes;
+    },
+    seedableFinds(threshold: number, count: number): StoredFind[] {
+      return db.prepare(`
+        SELECT * FROM finds WHERE score >= ? AND seeded_idea_id IS NULL ORDER BY score DESC, id LIMIT ?
+      `).all(threshold, count).map(findFromRow);
+    },
+    seedFind(boardId: number, id: number, at: { x: number; y: number }) {
+      return tx(() => {
+        const find = repo.getFind(id);
+        if (!find || find.seededIdeaId !== null) return null;
+        const idea = insertIdeaRow({
+          boardId, title: find.title, pitch: find.summary.slice(0, 600), kind: 'seed',
+          sourceUrl: find.url, seedSource: find.source, generation: 0, ...at,
+        }, []);
+        db.prepare('UPDATE finds SET seeded_idea_id = ? WHERE id = ?').run(idea.id, id);
+        return { idea, find: { ...find, seededIdeaId: idea.id } };
+      });
     },
 
     // ---- leads

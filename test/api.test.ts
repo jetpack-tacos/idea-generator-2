@@ -96,6 +96,28 @@ const newBoard = async (extra: object = {}) => (await api('POST', '/api/boards',
 const seed = async (boardId: number, text: string) => (await api('POST', `/api/boards/${boardId}/seed`, { text })).data.idea;
 const lastCall = (schema: string) => [...calls].reverse().find((c) => c.schemaName === schema)!;
 
+test('the board API lists scored finds and a dropped find seeds exactly once across boards', async () => {
+  const board = await newBoard({ title: 'TEST find board' });
+  const other = await newBoard({ title: 'TEST other find board' });
+  const [find] = repo.addFinds([{
+    source: 'lobsters', externalId: 'test-drop', title: 'TEST drop', url: 'https://example.test/drop', summary: 'TEST summary',
+  }], Date.now());
+  repo.saveFindScores(new Map([[find.id, 0.75]]));
+  const before = await api('GET', `/api/boards/${board.id}`);
+  assert.equal(before.data.finds.find((row: typeof find) => row.id === find.id).score, 0.75);
+  const seeded = await api('POST', `/api/boards/${board.id}/finds/${find.id}/seed`, { x: 33, y: -49 });
+  assert.equal(seeded.status, 200);
+  const { idea } = seeded.data;
+  assert.deepEqual([idea.title, idea.kind, idea.generation, idea.sourceUrl, idea.seedSource, idea.x, idea.y],
+    ['TEST drop', 'seed', 0, 'https://example.test/drop', 'lobsters', 33, -49]);
+  assert.equal((await api('POST', `/api/boards/${other.id}/finds/${find.id}/seed`, {})).status, 409);
+  const after = await api('GET', `/api/boards/${other.id}`);
+  assert.equal(after.data.finds.find((row: typeof find) => row.id === find.id).seededIdeaId, idea.id);
+  assert.equal(after.data.ideas.length, 0);
+  await engine.idle();
+  assert.ok(repo.getIdea(idea.id)?.judgedAt);
+});
+
 test('full loop: seed → background judge → expand → combine → export', async () => {
   judgeScores = { originality: 3, feasibility: 3, impact: 3 };
   const board = await newBoard({ goal: 'Färre bilresor i staden' });
