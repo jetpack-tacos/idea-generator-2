@@ -64,7 +64,7 @@ export async function generateExistsQueries(a: {
     schemaName: 'exists_queries',
     schema: QUERIES_SCHEMA,
     temperature: 0.2,
-    maxTokens: 300,
+    maxTokens: 600,
   });
   const queries = (Array.isArray(value?.queries) ? value.queries : [])
     .map((q: unknown) => String(q ?? '').replace(/\s+/g, ' ').trim().slice(0, 80))
@@ -185,7 +185,7 @@ export async function judgeExistingTool(a: {
     schemaName: 'exists_verdict',
     schema: VERDICT_SCHEMA,
     temperature: 0.1,
-    maxTokens: 400,
+    maxTokens: 1000,
   });
 
   const verdict = value?.verdict;
