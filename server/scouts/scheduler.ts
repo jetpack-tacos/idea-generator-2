@@ -4,7 +4,8 @@ import type { Engine } from '../engine.ts';
 import type { AppSettings } from '../providers.ts';
 import { judgeMany } from './filter.ts';
 import type { Scout } from './http.ts';
-import { scouts, type ScoutSource } from './sources.ts';
+import { fetchSessionWishes, type SessionFind } from './sessions.ts';
+import { scouts, type PublicScoutSource, type ScoutSource } from './sources.ts';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -14,30 +15,61 @@ export function createScoutScheduler(deps: {
   engine: Engine;
   settings: () => AppSettings;
   now?: () => number;
-  sources?: Partial<Record<ScoutSource, Scout>>;
+  sources?: Partial<Record<PublicScoutSource, Scout>>;
+  sessionsScout?: () => Promise<SessionFind[]>;
   log?: (message: string) => void;
 }) {
   const { repo, engine } = deps;
   const now = deps.now ?? Date.now;
   const log = deps.log ?? console.log;
-  const sources = Object.entries(deps.sources ?? scouts) as [ScoutSource, Scout][];
+  const sources = Object.entries(deps.sources ?? scouts) as [PublicScoutSource, Scout][];
   const busy = new Set<ScoutSource>();
   const pending = new Set<Promise<void>>();
   let readyAt = Infinity;
   let nextCleanup = 0;
   let timer: ReturnType<typeof setInterval> | undefined;
 
-  async function round(due: [ScoutSource, Scout][], settings: AppSettings) {
+  async function round(due: [PublicScoutSource, Scout][], runSessions: boolean, settings: AppSettings) {
     const batches = await Promise.all(due.map(async ([source, fetch]) => {
       try {
-        return await fetch();
+        const result = await fetch();
+        repo.clearScoutError(source);
+        return result;
       } catch (error: any) {
-        log(`[scouts] ${source} failed, retry on its next round: ${error.message ?? error}`);
+        const msg = error?.message ?? String(error);
+        repo.recordScoutError(source, msg, now());
+        log(`[scouts] ${source} failed, retry on its next round: ${msg}`);
         return [];
       }
     }));
+
+    let sessionFinds: SessionFind[] = [];
+    if (runSessions) {
+      try {
+        sessionFinds = deps.sessionsScout
+          ? await deps.sessionsScout()
+          : await fetchSessionWishes({
+              sessionsPath: settings.sessionsPath,
+              judgeManyPath: settings.judgeManyPath,
+              now: now(),
+              log,
+            });
+        repo.clearScoutError('sessions');
+      } catch (error: any) {
+        const msg = error?.message ?? String(error);
+        repo.recordScoutError('sessions', msg, now());
+        log(`[scouts] sessions failed: ${msg}`);
+      }
+    }
+
     // From here through insertion there is no await, so overlapping rounds cannot score the same find.
-    const finds = repo.addFinds(batches.flat(), now());
+    const t = now();
+    const finds = repo.addFinds(batches.flat(), t);
+    if (sessionFinds.length) {
+      // Session finds are already privately scored (wish >= 0.7) and must NEVER reach --public or cloud models.
+      repo.addFinds(sessionFinds, t);
+    }
+
     const boards = repo.listBoards();
     const board = boards.find((b) => b.config.mode === 'auto') ?? boards[0];
     const context = [board?.goal ? `Board goal: ${board.goal}` : '', settings.interests].filter(Boolean).join('\n\n');
@@ -49,7 +81,7 @@ export function createScoutScheduler(deps: {
         log(`[scouts] judge_many filter failed: ${error.message ?? error}`);
       }
     }
-    const unscored = finds.filter((find) => repo.getFind(find.id)?.score === null);
+    const unscored = finds.filter((find) => find.source !== 'sessions' && repo.getFind(find.id)?.score === null);
     if (unscored.length) log(`[scouts] research model filter for ${unscored.length} new finds`);
     for (let i = 0; i < unscored.length; i += 10) {
       const day = localDay(new Date(now()));
@@ -88,12 +120,17 @@ export function createScoutScheduler(deps: {
     if (activeHoursUntil(time, settings.activeHours) !== null) return Promise.resolve();
     const due = sources.filter(([source]) => !busy.has(source) &&
       repo.claimScout(source, time, settings.scoutIntervalsHours[source] * HOUR));
-    if (!due.length) return Promise.resolve();
+    const sessionsEnabled = Boolean(deps.sessionsScout || (settings.sessionsPath && settings.judgeManyPath));
+    const runSessions = sessionsEnabled && !busy.has('sessions') &&
+      repo.claimScout('sessions', time, (settings.scoutIntervalsHours.sessions ?? 12) * HOUR);
+    if (!due.length && !runSessions) return Promise.resolve();
     for (const [source] of due) busy.add(source);
-    const done = round(due, settings)
+    if (runSessions) busy.add('sessions');
+    const done = round(due, runSessions, settings)
       .catch((error) => log(`[scouts] round failed: ${error.message ?? error}`))
       .finally(() => {
         for (const [source] of due) busy.delete(source);
+        if (runSessions) busy.delete('sessions');
         pending.delete(done);
       });
     pending.add(done);

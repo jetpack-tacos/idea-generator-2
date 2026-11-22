@@ -497,6 +497,15 @@ export class Graph {
         ctx.fillStyle = '#111';
         ctx.font = `800 ${br * 0.95}px ${FONT}`;
         ctx.fillText('CC', bx, by + 0.5);
+      } else if (idea.existsVerdict === 'exists') {
+        const bx = n.x + r * 0.72, by = n.y - r * 0.72, br = Math.max(9, fs * 0.75);
+        ctx.beginPath();
+        ctx.arc(bx, by, br, 0, Math.PI * 2);
+        ctx.fillStyle = '#f5c542';
+        ctx.fill();
+        ctx.fillStyle = '#111';
+        ctx.font = `800 ${br * 0.85}px ${FONT}`;
+        ctx.fillText('EX', bx, by + 0.5);
       }
     }
     ctx.globalAlpha = 1;

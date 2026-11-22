@@ -7,9 +7,10 @@
 //   4. the board's steps per hour (sliding window)
 //   5. the board's pace (seconds between steps)
 
-import type { Repo } from './db.ts';
+import { localDay, type Board, type Idea, type Repo } from './db.ts';
 import type { Engine } from './engine.ts';
-import type { AppSettings } from './providers.ts';
+import { isCrewModel, type AppSettings } from './providers.ts';
+import { isJudged } from '../public/js/score.js';
 
 export type RateInput = {
   now: number;
@@ -51,6 +52,21 @@ export function activeHoursUntil(time: number, hours: AppSettings['activeHours']
   return null;
 }
 
+export function deepCrossDue(
+  time: number,
+  hours: AppSettings['activeHours'],
+  board: Pick<Board, 'deepCrossDay'>,
+  ideas: Pick<Idea, 'originality' | 'feasibility' | 'impact'>[],
+): boolean {
+  if (activeHoursUntil(time, hours) !== null) return false;
+  const [startHour, startMinute] = hours.start.split(':').map(Number);
+  const start = new Date(time).setHours(startHour, startMinute, 0, 0);
+  if (time < start + HOUR) return false;
+  const today = localDay(new Date(time));
+  if (board.deepCrossDay === today) return false;
+  return ideas.filter((i) => isJudged(i)).length >= 2;
+}
+
 /** Pure: may this board take a step now? */
 export function rateCheck(i: RateInput): RateDecision {
   const until = activeHoursUntil(i.now, i.activeHours);
@@ -68,7 +84,7 @@ export function rateCheck(i: RateInput): RateDecision {
 }
 
 export type AutopilotStatus = {
-  /** manual | night | running | idle | error | pace | hourly | backoff | board_budget | global_budget */
+  /** manual | night | running | idle | error | pace | hourly | backoff | board_budget | global_budget | crew_cap */
   state: string;
   until?: number;
   code?: string;
@@ -76,6 +92,7 @@ export type AutopilotStatus = {
   last?: string;
   stepsLastHour?: number;
   spentToday?: number;
+  crewPaused?: boolean;
 };
 
 type BoardState = { busy: boolean; steps: number[]; lastAt: number; errors: number; lastErrorAt: number; status: AutopilotStatus; sent: string };
@@ -84,6 +101,7 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
   const { repo, engine } = deps;
   const now = deps.now ?? Date.now;
   const states = new Map<number, BoardState>();
+  const deepPausedDay = new Map<number, string>();
 
   function publish(boardId: number, s: BoardState, status: AutopilotStatus) {
     s.status = status;
@@ -95,8 +113,13 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
 
   async function tick() {
     const t = now();
-    const globalSpent = repo.spentOn(null);
-    const { activeHours, maxUsdPerDay } = deps.settings();
+    const day = localDay(new Date(t));
+    const settings = deps.settings();
+    const { activeHours, maxUsdPerDay, crewCallsPerDay } = settings;
+    const globalSpent = repo.spentOn(null, day);
+    const crewCallsToday = typeof repo.crewCallsOn === 'function' ? repo.crewCallsOn(day) : 0;
+    const crewAtCap = crewCallsToday >= crewCallsPerDay;
+
     for (const b of repo.listBoards()) {
       if (b.config.mode !== 'auto') {
         if (states.delete(b.id)) engine.bus.emit(b.id, { type: 'autopilot', status: { state: 'manual' } });
@@ -109,8 +132,11 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
       }
       if (s.busy) continue;
       s.steps = s.steps.filter((x) => x > t - HOUR);
-      const boardSpent = repo.spentOn(b.id);
-      const counts = { stepsLastHour: s.steps.length, spentToday: Math.round(boardSpent * 10000) / 10000 };
+      const boardSpent = repo.spentOn(b.id, day);
+      const deepModel = b.config.models.deep || settings.models.deep || '';
+      const briefModel = b.config.models.brief || settings.models.brief || '';
+      const crewPaused = crewAtCap && (isCrewModel(deepModel) || isCrewModel(briefModel));
+      const counts = { stepsLastHour: s.steps.length, spentToday: Math.round(boardSpent * 10000) / 10000, ...(crewPaused ? { crewPaused: true } : {}) };
       const d = rateCheck({
         now: t, activeHours, steps: s.steps, lastAt: s.lastAt, paceSeconds: b.config.autopilotSeconds,
         stepsPerHour: b.config.rate.stepsPerHour, boardSpent, boardUsdPerDay: b.config.rate.usdPerDay,
@@ -118,10 +144,55 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
       });
       if (!d.ok) {
         // Keep the last result visible while merely pacing.
-        if (d.reason === 'pace' && (s.status.state === 'idle' || s.status.state === 'error')) continue;
+        if (d.reason === 'pace' && (s.status.state === 'idle' || s.status.state === 'error' || s.status.state === 'crew_cap')) continue;
         publish(b.id, s, { state: d.reason, until: d.until, last: s.status.last, ...counts });
         continue;
       }
+
+      // Check daily deep cross first (1h after activeHours.start, once per local day per auto board).
+      if (typeof engine.deepCross === 'function' && deepPausedDay.get(b.id) !== day) {
+        const ideas = repo.listIdeas(b.id);
+        if (deepCrossDue(t, activeHours, b, ideas)) {
+          if (crewAtCap && isCrewModel(deepModel)) {
+            deepPausedDay.set(b.id, day);
+          } else {
+            s.busy = true;
+            publish(b.id, s, { state: 'running', last: s.status.last, ...counts });
+            const st = s;
+            engine
+              .deepCross(b.id)
+              .then(() => {
+                st.steps.push(now());
+                st.lastAt = now();
+                st.errors = 0;
+                publish(b.id, st, {
+                  state: 'pace', until: now() + b.config.autopilotSeconds * 1000,
+                  last: 'deep', stepsLastHour: st.steps.length, spentToday: counts.spentToday,
+                  ...(crewPaused ? { crewPaused: true } : {}),
+                });
+              })
+              .catch((e: any) => {
+                if (e?.code === 'crew_cap') {
+                  deepPausedDay.set(b.id, day);
+                  st.lastAt = now();
+                  publish(b.id, st, {
+                    state: 'pace', until: now() + b.config.autopilotSeconds * 1000,
+                    last: st.status.last, stepsLastHour: st.steps.length, spentToday: counts.spentToday, crewPaused: true,
+                  });
+                } else {
+                  st.errors++;
+                  st.lastErrorAt = st.lastAt = now();
+                  publish(b.id, st, { state: 'error', code: e?.code ?? 'error', message: e?.message ?? String(e), until: now() + backoffMs(st.errors), ...counts });
+                }
+              })
+              .finally(() => {
+                st.busy = false;
+              });
+            continue;
+          }
+        }
+      }
+
       s.busy = true;
       publish(b.id, s, { state: 'running', last: s.status.last, ...counts });
       const st = s;
@@ -134,12 +205,21 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
           publish(b.id, st, {
             state: r.did === 'idle' ? 'idle' : 'pace', until: now() + b.config.autopilotSeconds * 1000,
             last: r.did === 'idle' ? r.reason : r.did, stepsLastHour: st.steps.length, spentToday: counts.spentToday,
+            ...(crewPaused ? { crewPaused: true } : {}),
           });
         })
         .catch((e: any) => {
-          st.errors++;
-          st.lastErrorAt = st.lastAt = now();
-          publish(b.id, st, { state: 'error', code: e?.code ?? 'error', message: e?.message ?? String(e), until: now() + backoffMs(st.errors), ...counts });
+          if (e?.code === 'crew_cap') {
+            st.lastAt = now();
+            publish(b.id, st, {
+              state: 'crew_cap', code: 'crew_cap', message: e?.message ?? 'Daily crew limit reached; resumes tomorrow',
+              until: nextLocalMidnight(now()), ...counts, crewPaused: true,
+            });
+          } else {
+            st.errors++;
+            st.lastErrorAt = st.lastAt = now();
+            publish(b.id, st, { state: 'error', code: e?.code ?? 'error', message: e?.message ?? String(e), until: now() + backoffMs(st.errors), ...counts });
+          }
         })
         .finally(() => {
           st.busy = false;

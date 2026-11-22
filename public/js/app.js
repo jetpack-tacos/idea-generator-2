@@ -12,7 +12,7 @@ import { openReport } from './report.js';
 const MEDAL_ICON = ['–', '🥉', '🥈', '🥇'];
 const S = {
   boards: [], board: null, ideas: new Map(), edges: [], leads: [], finds: [], spinoffs: [], judging: new Set(),
-  autopilot: { state: 'manual' }, spentToday: 0, selected: null, templates: [], providers: null,
+  autopilot: { state: 'manual' }, status: null, spentToday: 0, selected: null, templates: [], providers: null,
   settings: null, stopFollow: null, createAt: null, leadsTab: 'github-trending', refreshing: {},
 };
 const fail = (e) => toast(errorText(e), 'error', 8000);
@@ -136,6 +136,7 @@ function onEvent(e) {
     case 'finds':
       S.finds = e.finds;
       renderLeads();
+      loadStatus();
       break;
     case 'leads':
       S.leads = [...S.leads.filter((l) => l.source !== e.source), ...e.leads];
@@ -145,10 +146,12 @@ function onEvent(e) {
       S.autopilot = e.status;
       if (e.status.spentToday != null) S.spentToday = e.status.spentToday;
       renderAutopilot();
-      if (e.status.state === 'error' && e.status.code === 'no_key') toast(errorText(e.status), 'error', 8000);
+      loadStatus();
+      if (e.status.state === 'error' && (e.status.code === 'no_key' || e.status.code === 'crew_signin')) toast(errorText(e.status), 'error', 8000);
       break;
     case 'project':
       toast(t('projectCreated', { p: e.path }), 'good', 9000);
+      loadStatus();
       break;
     case 'spinoff':
       S.spinoffs.push({ ideaId: e.ideaId, boardId: e.boardId, title: e.title });
@@ -258,6 +261,7 @@ async function patchBoard(patch) {
     S.boards = S.boards.map((b) => (b.id === board.id ? { ...b, ...board } : b));
     renderHeader();
     renderBoardMenu();
+    loadStatus();
     return board;
   } catch (e) {
     fail(e);
@@ -286,6 +290,15 @@ function renderHeader() {
   renderAutopilot();
 }
 
+function formatApState(st) {
+  const secs = st?.until ? Math.max(0, Math.ceil((st.until - Date.now()) / 1000)) : 0;
+  const time = st?.until ? new Date(st.until).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '';
+  const key = st?.state === 'idle'
+    ? (st.last === 'empty' ? 'ap_idle_empty' : st.last === 'nothing_to_do' ? 'ap_idle_nothing' : 'ap_idle')
+    : `ap_${st?.state ?? 'manual'}`;
+  return t(key, { s: `${secs} s`, time, m: st?.message ?? '' });
+}
+
 function renderAutopilot() {
   const st = S.autopilot ?? { state: 'manual' };
   const chip = $('#ap-status');
@@ -294,14 +307,65 @@ function renderAutopilot() {
     chip.className = 'ap-chip';
     return;
   }
-  const secs = st.until ? Math.max(0, Math.ceil((st.until - Date.now()) / 1000)) : 0;
-  const time = st.until ? new Date(st.until).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '';
-  const key = st.state === 'idle' ? (st.last === 'empty' ? 'ap_idle_empty' : st.last === 'nothing_to_do' ? 'ap_idle_nothing' : 'ap_idle') : `ap_${st.state}`;
-  chip.textContent = t(key, { s: `${secs} s`, time, m: st.message ?? '' });
+  chip.textContent = formatApState(st);
   chip.title = t('apMeta', { n: st.stepsLastHour ?? 0, usd: (st.spentToday ?? S.spentToday ?? 0).toFixed(3) });
-  chip.className = `ap-chip ${['error', 'backoff', 'board_budget', 'global_budget', 'hourly'].includes(st.state) ? 'warn' : st.state === 'running' ? 'busy' : ''}`;
+  chip.className = `ap-chip ${['error', 'backoff', 'board_budget', 'global_budget', 'hourly', 'crew_cap'].includes(st.state) ? 'warn' : st.state === 'running' ? 'busy' : ''}`;
 }
-setInterval(() => S.autopilot?.until && renderAutopilot(), 1000);
+
+async function loadStatus() {
+  try {
+    S.status = await api('GET', '/api/status');
+    renderStatusStrip();
+  } catch {
+    /* ignore transient polling failures */
+  }
+}
+
+function renderStatusStrip() {
+  const strip = $('#status-strip');
+  const st = S.status;
+  if (!strip || !st) return;
+  const fmtTime = (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  const errors = [];
+  for (const b of st.boards ?? []) {
+    if (b.autopilot?.state === 'error') {
+      errors.push(`${b.title}: ${b.autopilot.code ? errorText(b.autopilot) : (b.autopilot.message || 'Error')}`);
+    }
+  }
+  for (const sc of st.scouts ?? []) {
+    if (sc.lastError) errors.push(`${scoutLabels[sc.source] ?? sc.source}: ${sc.lastError}`);
+  }
+  const boardChips = (st.boards ?? []).map((b) => {
+    const label = b.mode === 'auto' ? formatApState(b.autopilot) : t('manual');
+    const cls = b.autopilot?.state === 'error' ? 'err' : b.autopilot?.state === 'crew_cap' || b.autopilot?.crewPaused ? 'warn' : b.mode === 'auto' ? 'ok' : '';
+    return h('button', {
+      class: `status-chip btn-chip ${cls}`,
+      onclick: () => b.id !== S.board?.id && openBoard(b.id),
+    }, `${b.title}: ${label}`);
+  });
+  const crewCls = st.crewCallsToday >= st.crewCallsPerDay ? 'warn' : '';
+  const crewLabel = `Crew: ${st.crewCallsToday}/${st.crewCallsPerDay}${st.crewCallsToday >= st.crewCallsPerDay ? ' (paused until tomorrow)' : ''}`;
+  const scoutRuns = st.scouts ?? [];
+  clear(strip,
+    h('span', { class: 'status-group' }, boardChips),
+    h('span', { class: 'status-group' },
+      h('span', { class: 'status-chip' }, `Today: $${Number(st.spentTodayUsd ?? 0).toFixed(3)} / $${st.maxUsdPerDay}`),
+      h('span', { class: `status-chip ${crewCls}` }, crewLabel),
+    ),
+    h('span', { class: 'status-group' },
+      h('span', {}, 'Scouts:'),
+      scoutRuns.length
+        ? scoutRuns.map((sc) => h('span', { class: `status-chip ${sc.lastError ? 'err' : ''}`, title: sc.lastError ?? '' },
+            `${scoutLabels[sc.source] ?? sc.source} ${fmtTime(sc.startedAt)}`))
+        : h('span', {}, 'none yet'),
+    ),
+    errors.length ? h('span', { class: 'status-group' }, errors.map((msg) => h('span', { class: 'status-chip err' }, msg))) : null,
+  );
+}
+setInterval(() => {
+  if (S.autopilot?.until) renderAutopilot();
+}, 1000);
+setInterval(() => loadStatus(), 10_000);
 
 function renderBoardMenu() {
   const menu = $('#board-menu');
@@ -391,6 +455,13 @@ function renderIdea(idea) {
     idea.pitch ? h('p', { class: 'pitch' }, idea.pitch) : null,
     idea.sourceUrl ? h('a', { class: 'source', href: idea.sourceUrl, target: '_blank', rel: 'noopener noreferrer' }, `${t('source')} ↗`) : null,
     scoreBlock(idea),
+    idea.existsVerdict
+      ? h('div', { class: `exists-mark ${idea.existsVerdict === 'exists' ? '' : 'info'}` },
+          h('strong', {}, idea.existsVerdict === 'exists' ? t('alreadyExists') : idea.existsVerdict === 'partial' ? t('existsPartial') : t('existsNew')),
+          idea.existsUrl ? [' · ', h('a', { href: idea.existsUrl, target: '_blank', rel: 'noopener noreferrer' }, `${t('source')} ↗`)] : null,
+          idea.existsReason ? h('p', {}, idea.existsReason) : null,
+        )
+      : null,
     idea.keywords?.length
       ? h('div', { class: 'chips' }, idea.keywords.map((k) => h('span', { class: 'chip' }, k)))
       : null,
@@ -536,6 +607,7 @@ const scoutLabels = {
   lobsters: 'Lobsters',
   papers: 'Papers',
   'google-news': 'Google News',
+  sessions: 'Sessions',
 };
 
 function renderLeads() {
@@ -759,6 +831,7 @@ async function appSettingsDialog() {
   })]));
   const root = h('input', { value: settings.projectsRoot, required: true });
   const budget = h('input', { type: 'number', min: 0, max: 1000, step: 'any', value: settings.maxUsdPerDay, required: true });
+  const crewCap = h('input', { type: 'number', min: 0, max: 10000, step: 1, value: settings.crewCallsPerDay ?? 10, required: true });
   const start = h('input', { type: 'time', value: settings.activeHours.start, required: true });
   const end = h('input', { type: 'time', value: settings.activeHours.end, required: true });
   const spend = t('spend', { today: providers.spentToday.toFixed(3), total: providers.spentTotal.usd.toFixed(3) });
@@ -767,7 +840,7 @@ async function appSettingsDialog() {
     if (!dlg.querySelector('form').reportValidity()) return;
     S.settings = await saveSettings({
       models: Object.fromEntries(ROLES.map((role) => [role, models[role].value.trim()])),
-      projectsRoot: root.value.trim(), maxUsdPerDay: Number(budget.value),
+      projectsRoot: root.value.trim(), maxUsdPerDay: Number(budget.value), crewCallsPerDay: Number(crewCap.value),
       activeHours: { start: start.value, end: end.value },
     });
     S.providers = providers;
@@ -775,6 +848,7 @@ async function appSettingsDialog() {
     toast(t('settingsSaved'));
     renderLeads();
     warnMissingKeys();
+    loadStatus();
   }
 
   const dlg = dialog('dlg', t('appSettings'), [
@@ -783,7 +857,8 @@ async function appSettingsDialog() {
     h('fieldset', {}, h('legend', {}, t('models')), h('div', { class: 'grid2' }, ROLES.map((role) => field(t(`role_${role}`), models[role]))),
       h('small', { class: 'muted' }, t('calibrateNote'))),
     h('fieldset', {}, h('legend', {}, 'Claude Code'), field(t('projectsRoot'), root)),
-    h('fieldset', {}, h('legend', {}, t('autopilot')), field(t('globalBudget'), budget, spend),
+    h('fieldset', {}, h('legend', {}, t('autopilot')),
+      h('div', { class: 'grid2' }, field(t('globalBudget'), budget, spend), field(t('crewCallsPerDay'), crewCap)),
       h('div', { class: 'grid2' }, field(t('activeStart'), start), field(t('activeEnd'), end))),
   ], [
     h('button', { class: 'btn', value: 'cancel', formnovalidate: true }, t('cancel')),
@@ -881,6 +956,7 @@ async function main() {
     return;
   }
   await loadBoards();
+  await loadStatus();
   const last = Number(localStorage.getItem('ideagen.board'));
   const pick = S.boards.find((b) => b.id === last) ?? S.boards[0];
   if (pick) await openBoard(pick.id);

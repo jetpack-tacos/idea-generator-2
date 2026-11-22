@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS boards (
   config TEXT NOT NULL DEFAULT '{}',
   origin_idea_id INTEGER REFERENCES ideas(id) ON DELETE SET NULL,
   summary TEXT,
+  deep_cross_day TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -44,6 +45,11 @@ CREATE TABLE IF NOT EXISTS ideas (
   medal_override INTEGER,
   generation INTEGER NOT NULL DEFAULT 0,
   project_path TEXT,
+  exists_verdict TEXT,
+  exists_url TEXT,
+  exists_reason TEXT,
+  exists_attempts INTEGER NOT NULL DEFAULT 0,
+  exists_checked_at TEXT,
   origin_idea_id INTEGER REFERENCES ideas(id) ON DELETE SET NULL,
   origin_board_id INTEGER REFERENCES boards(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -87,7 +93,8 @@ CREATE INDEX IF NOT EXISTS finds_age ON finds(first_seen);
 CREATE INDEX IF NOT EXISTS finds_seedable ON finds(score DESC, id) WHERE seeded_idea_id IS NULL;
 CREATE TABLE IF NOT EXISTS scout_runs (
   source TEXT PRIMARY KEY,
-  started_at INTEGER NOT NULL
+  started_at INTEGER NOT NULL,
+  last_error TEXT
 );
 -- Keywords come from the judge, in one canonical form, so trends can be counted across boards.
 CREATE TABLE IF NOT EXISTS idea_keywords (
@@ -112,6 +119,11 @@ CREATE TABLE IF NOT EXISTS spend (
   usd REAL NOT NULL DEFAULT 0,
   calls INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (board_id, day)
+);
+-- Crew call counter per local calendar day across all boards.
+CREATE TABLE IF NOT EXISTS crew_usage (
+  day TEXT PRIMARY KEY,
+  calls INTEGER NOT NULL DEFAULT 0
 );
 `;
 
@@ -241,6 +253,8 @@ export function mergeConfig(base: BoardConfig, raw: any): BoardConfig {
   };
 }
 
+export type ExistsVerdict = 'exists' | 'partial' | 'new';
+
 export type Idea = {
   id: number;
   boardId: number;
@@ -259,6 +273,11 @@ export type Idea = {
   medalOverride: number | null;
   generation: number;
   projectPath: string | null;
+  existsVerdict: ExistsVerdict | null;
+  existsUrl: string | null;
+  existsReason: string | null;
+  existsAttempts: number;
+  existsCheckedAt: string | null;
   originIdeaId: number | null;
   originBoardId: number | null;
   originBoardTitle: string | null;
@@ -271,6 +290,7 @@ export type Board = {
   /** Spin-off boards: the idea this board grew from, and where that idea lives. */
   originIdeaId: number | null; originIdeaTitle: string | null; originBoardId: number | null; originBoardTitle: string | null;
   summary: BoardSummary | null;
+  deepCrossDay: string | null;
 };
 export type BoardSummary = {
   headline: string;
@@ -316,6 +336,11 @@ const ideaFromRow = (r: any): Idea => ({
   medalOverride: r.medal_override,
   generation: r.generation,
   projectPath: r.project_path,
+  existsVerdict: r.exists_verdict ?? null,
+  existsUrl: r.exists_url ?? null,
+  existsReason: r.exists_reason ?? null,
+  existsAttempts: r.exists_attempts ?? 0,
+  existsCheckedAt: r.exists_checked_at ?? null,
   originIdeaId: r.origin_idea_id,
   originBoardId: r.origin_board_id,
   originBoardTitle: r.origin_board_title ?? null,
@@ -346,6 +371,7 @@ const boardFromRow = (r: any): Board => ({
   originBoardId: r.origin_board_id ?? null,
   originBoardTitle: r.origin_board_title ?? null,
   summary: r.summary ? parseJson(r.summary) : null,
+  deepCrossDay: r.deep_cross_day ?? null,
 });
 
 const leadFromRow = (r: any): Lead => ({
@@ -389,7 +415,10 @@ export function openDb(file: string) {
     }
   };
 
-  if (!db.prepare('PRAGMA table_info(ideas)').all().some((column) => column.name === 'seed_source')) {
+  const hasCol = (table: string, col: string) =>
+    db.prepare(`PRAGMA table_info(${table})`).all().some((column) => column.name === col);
+
+  if (!hasCol('ideas', 'seed_source')) {
     tx(() => {
       db.exec(`ALTER TABLE ideas ADD COLUMN seed_source TEXT;
         UPDATE ideas SET seed_source = (
@@ -398,6 +427,17 @@ export function openDb(file: string) {
         ) WHERE kind = 'seed';`);
     });
   }
+  for (const [col, def] of [
+    ['exists_verdict', 'TEXT'],
+    ['exists_url', 'TEXT'],
+    ['exists_reason', 'TEXT'],
+    ['exists_attempts', 'INTEGER NOT NULL DEFAULT 0'],
+    ['exists_checked_at', 'TEXT'],
+  ] as const) {
+    if (!hasCol('ideas', col)) db.exec(`ALTER TABLE ideas ADD COLUMN ${col} ${def};`);
+  }
+  if (!hasCol('boards', 'deep_cross_day')) db.exec('ALTER TABLE boards ADD COLUMN deep_cross_day TEXT;');
+  if (!hasCol('scout_runs', 'last_error')) db.exec('ALTER TABLE scout_runs ADD COLUMN last_error TEXT;');
 
   function insertIdeaRow(i: {
     boardId: number; title: string; pitch: string; kind: Idea['kind']; sourceUrl?: string | null; seedSource?: string | null;
@@ -458,6 +498,10 @@ export function openDb(file: string) {
       db.prepare('UPDATE boards SET summary = ? WHERE id = ?').run(JSON.stringify(summary), id);
       return repo.getBoard(id);
     },
+    setDeepCrossDay(id: number, day: string) {
+      db.prepare('UPDATE boards SET deep_cross_day = ? WHERE id = ?').run(day, id);
+      return repo.getBoard(id);
+    },
     touchBoard(id: number) {
       db.prepare(`UPDATE boards SET updated_at = datetime('now') WHERE id = ?`).run(id);
     },
@@ -488,6 +532,16 @@ export function openDb(file: string) {
       db.prepare(
         `UPDATE ideas SET originality = ?, feasibility = ?, impact = ?, reason = ?, judged_at = datetime('now') WHERE id = ?`,
       ).run(j.originality, j.feasibility, j.impact, j.reason, id);
+      return repo.getIdea(id);
+    },
+    saveExistsResult(id: number, r: { verdict: ExistsVerdict; url: string | null; reason: string }) {
+      db.prepare(
+        `UPDATE ideas SET exists_verdict = ?, exists_url = ?, exists_reason = ?, exists_checked_at = datetime('now') WHERE id = ?`,
+      ).run(r.verdict, r.url, r.reason, id);
+      return repo.getIdea(id);
+    },
+    incrementExistsAttempt(id: number) {
+      db.prepare('UPDATE ideas SET exists_attempts = exists_attempts + 1 WHERE id = ?').run(id);
       return repo.getIdea(id);
     },
     setKeywords(id: number, keywords: string[]) {
@@ -566,16 +620,36 @@ export function openDb(file: string) {
         ON CONFLICT(source) DO UPDATE SET started_at = excluded.started_at WHERE started_at <= ?
       `).run(source, time, time - interval).changes > 0;
     },
-    addFinds(drafts: Find[], time: number): StoredFind[] {
+    recordScoutError(source: string, error: string, time: number) {
+      db.prepare(`
+        INSERT INTO scout_runs (source, started_at, last_error) VALUES (?, ?, ?)
+        ON CONFLICT(source) DO UPDATE SET last_error = excluded.last_error
+      `).run(source, time, error.slice(0, 300));
+    },
+    clearScoutError(source: string) {
+      db.prepare('UPDATE scout_runs SET last_error = NULL WHERE source = ?').run(source);
+    },
+    listScoutRuns(): { source: string; startedAt: number; lastError: string | null }[] {
+      return db.prepare('SELECT source, started_at, last_error FROM scout_runs ORDER BY source').all().map((r: any) => ({
+        source: r.source,
+        startedAt: r.started_at,
+        lastError: r.last_error ?? null,
+      }));
+    },
+    addFinds(drafts: (Find & { score?: number })[], time: number): StoredFind[] {
       const insert = db.prepare(`
-        INSERT INTO finds (source, external_id, title, url, summary, first_seen) VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO finds (source, external_id, title, url, summary, first_seen, score) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source, external_id) DO NOTHING RETURNING *
       `);
       return tx(() => {
         const added: StoredFind[] = [];
         for (const draft of drafts) {
-          if (!draft.externalId || !draft.title || !/^https?:\/\//i.test(draft.url)) continue;
-          const row = insert.get(draft.source, draft.externalId, draft.title, draft.url, draft.summary.slice(0, 1200), time);
+          const urlOk = draft.source === 'sessions' ? typeof draft.url === 'string' : /^https?:\/\//i.test(draft.url);
+          if (!draft.externalId || !draft.title || !urlOk) continue;
+          const score = typeof draft.score === 'number' && Number.isFinite(draft.score) && draft.score >= 0 && draft.score <= 1
+            ? draft.score
+            : null;
+          const row = insert.get(draft.source, draft.externalId, draft.title, draft.url, draft.summary.slice(0, 1200), time, score);
           if (row) added.push(findFromRow(row));
         }
         return added;
@@ -613,7 +687,7 @@ export function openDb(file: string) {
         if (!find || find.seededIdeaId !== null) return null;
         const idea = insertIdeaRow({
           boardId, title: find.title, pitch: find.summary.slice(0, 600), kind: 'seed',
-          sourceUrl: find.url, seedSource: find.source, generation: 0, ...at,
+          sourceUrl: find.url || null, seedSource: find.source, generation: 0, ...at,
         }, []);
         db.prepare('UPDATE finds SET seeded_idea_id = ? WHERE id = ?').run(idea.id, id);
         return { idea, find: { ...find, seededIdeaId: idea.id } };
@@ -748,6 +822,18 @@ export function openDb(file: string) {
     spentTotal(): { usd: number; calls: number } {
       const r: any = db.prepare('SELECT SUM(usd) AS usd, SUM(calls) AS calls FROM spend').get();
       return { usd: r?.usd ?? 0, calls: r?.calls ?? 0 };
+    },
+
+    // ---- crew daily call quota
+    addCrewCall(day = localDay()) {
+      db.prepare(
+        `INSERT INTO crew_usage (day, calls) VALUES (?, 1)
+         ON CONFLICT(day) DO UPDATE SET calls = calls + 1`,
+      ).run(day);
+    },
+    crewCallsOn(day = localDay()): number {
+      const r: any = db.prepare('SELECT calls FROM crew_usage WHERE day = ?').get(day);
+      return r?.calls ?? 0;
     },
   };
   return repo;

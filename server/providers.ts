@@ -1,10 +1,20 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import defaults from '../settings.example.json' with { type: 'json' };
+import { runNoShell } from './alert.ts';
 import type { ScoutSource } from './scouts/sources.ts';
 
-export type ProviderId = 'openrouter' | 'anthropic' | 'openai' | 'deepseek' | 'zai';
-export type Role = 'distill' | 'expand' | 'combine' | 'judge' | 'summary' | 'research' | 'x' | 'brief';
-export const ROLES: Role[] = ['distill', 'expand', 'combine', 'judge', 'summary', 'research', 'x', 'brief'];
+export type ApiProviderId = 'openrouter' | 'anthropic' | 'openai' | 'deepseek' | 'zai';
+export type ProviderId = ApiProviderId | 'crew';
+export type CrewWorker = 'neon' | 'hydrogen';
+export type CrewEffort = 'low' | 'medium' | 'high' | 'xhigh';
+export type Role = 'distill' | 'expand' | 'combine' | 'judge' | 'summary' | 'research' | 'x' | 'brief' | 'deep' | 'exists';
+export const ROLES: Role[] = ['distill', 'expand', 'combine', 'judge', 'summary', 'research', 'x', 'brief', 'deep', 'exists'];
+
+const CREW_WORKERS = new Set<string>(['neon', 'hydrogen']);
+const CREW_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh']);
 
 export type AppSettings = {
   models: Record<Role, string>;
@@ -14,12 +24,22 @@ export type AppSettings = {
   activeHours: { start: string; end: string };
   scoutIntervalsHours: Record<ScoutSource, number>;
   judgeManyPath: string;
+  crewPath: string;
+  crewCallsPerDay: number;
+  alertCommand: string[];
+  sessionsPath: string;
   interests: string;
   seedThreshold: number;
   seedsPerRound: number;
 };
 
-export const DEFAULT_APP_SETTINGS: AppSettings = defaults;
+export const DEFAULT_APP_SETTINGS: AppSettings = {
+  ...(defaults as AppSettings),
+  judgeManyPath: '',
+  crewPath: '',
+  alertCommand: [],
+  sessionsPath: '',
+};
 
 type ProviderDef = {
   label: string;
@@ -30,7 +50,7 @@ type ProviderDef = {
   search?: boolean;
 };
 
-export const PROVIDERS: Record<ProviderId, ProviderDef> = {
+export const PROVIDERS: Record<ApiProviderId, ProviderDef> = {
   openrouter: { label: 'OpenRouter', type: 'openai', base: 'https://openrouter.ai/api/v1', env: 'OPENROUTER_API_KEY', search: true },
   anthropic: { label: 'Anthropic', type: 'anthropic', env: 'ANTHROPIC_API_KEY' },
   openai: { label: 'OpenAI', type: 'openai', base: 'https://api.openai.com/v1', env: 'OPENAI_API_KEY' },
@@ -38,23 +58,46 @@ export const PROVIDERS: Record<ProviderId, ProviderDef> = {
   zai: { label: 'Z.ai', type: 'openai', base: 'https://api.z.ai/api/paas/v4', env: 'ZAI_API_KEY' },
 };
 
+export function parseCrewModel(model: string): { worker: CrewWorker; effort: CrewEffort } {
+  const parts = model.split(':');
+  if (parts.length < 1 || parts.length > 2) throw new ProviderError('bad_model', `Invalid crew model "${model}"`);
+  const [worker, effort = 'medium'] = parts;
+  if (!CREW_WORKERS.has(worker)) throw new ProviderError('bad_model', `Unknown crew worker "${worker}" (expected neon or hydrogen)`);
+  if (!CREW_EFFORTS.has(effort)) throw new ProviderError('bad_model', `Invalid crew effort "${effort}" (expected low, medium, high, or xhigh)`);
+  return { worker: worker as CrewWorker, effort: effort as CrewEffort };
+}
+
 export function parseModel(ref: string): { provider: ProviderId; model: string } {
   const i = ref.indexOf(':');
   const head = i > 0 ? ref.slice(0, i) : '';
+  if (head === 'crew') {
+    const rest = ref.slice(i + 1);
+    const { worker, effort } = parseCrewModel(rest);
+    return { provider: 'crew', model: `${worker}:${effort}` };
+  }
   // Bare OpenRouter model slugs can have tags such as vendor/model:free.
-  if (Object.hasOwn(PROVIDERS, head) && ref.slice(i + 1)) return { provider: head as ProviderId, model: ref.slice(i + 1) };
+  if (Object.hasOwn(PROVIDERS, head) && ref.slice(i + 1)) return { provider: head as ApiProviderId, model: ref.slice(i + 1) };
   if (ref && (i < 0 || ref.slice(0, i).includes('/'))) return { provider: 'openrouter', model: ref };
   throw new ProviderError('bad_model', `Invalid model reference "${ref}"`);
 }
 
-export function keyFor(p: ProviderId): string | undefined {
+export function isCrewModel(ref: string): boolean {
+  if (!ref) return false;
+  try {
+    return parseModel(ref).provider === 'crew';
+  } catch {
+    return false;
+  }
+}
+
+export function keyFor(p: ApiProviderId): string | undefined {
   const env = PROVIDERS[p].env;
   return (env && process.env[env]) || undefined;
 }
 
-type BaseUrls = Partial<Record<ProviderId, string>>;
+type BaseUrls = Partial<Record<ApiProviderId, string>>;
 
-function baseFor(p: ProviderId, baseUrls: BaseUrls) {
+function baseFor(p: ApiProviderId, baseUrls: BaseUrls) {
   return (baseUrls[p] ?? PROVIDERS[p].base ?? '').replace(/\/+$/, '');
 }
 
@@ -80,6 +123,7 @@ export type ChatRequest = {
   schema: object;
   temperature: number;
   maxTokens?: number;
+  timeoutMs?: number;
   onUsage?: (usage: Usage) => void;
   boardId?: number;
   role?: Role;
@@ -99,7 +143,7 @@ const FLASH_PRICES: Record<string, [miss: number, hit: number, output: number]> 
   'zai:glm-5.3-flash': [0.15, 0.03, 0.50],
 };
 
-function chatUsage(provider: ProviderId, model: string, usage: any): Usage {
+function chatUsage(provider: ApiProviderId, model: string, usage: any): Usage {
   const hits = tokens(usage?.prompt_cache_hit_tokens ?? usage?.prompt_tokens_details?.cached_tokens);
   const inputTokens = tokens(usage?.prompt_tokens) || hits + tokens(usage?.prompt_cache_miss_tokens);
   const outputTokens = tokens(usage?.completion_tokens);
@@ -128,10 +172,74 @@ export function extractJson(text: string) {
   }
 }
 
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Pull the last fenced or bare JSON object out of a Markdown/prose reply. */
+export function extractLastJson(text: string): any {
+  const stripped = text.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  const candidates: { value: unknown; end: number }[] = [];
+
+  for (const match of stripped.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
+    const inner = match[1].trim();
+    try {
+      const parsed = JSON.parse(inner);
+      if (isPlainJsonObject(parsed)) {
+        candidates.push({ value: parsed, end: (match.index ?? 0) + match[0].length });
+      }
+    } catch {
+      /* ignore non-JSON fences or fences with prose around JSON (covered by bare scan) */
+    }
+  }
+
+  for (let i = 0; i < stripped.length; i++) {
+    if (stripped[i] !== '{') continue;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let j = i; j < stripped.length; j++) {
+      const ch = stripped[j];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (inString) {
+        if (ch === '\\') escape = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+      } else if (ch === '{') {
+        depth++;
+      } else if (ch === '}') {
+        depth--;
+        if (depth === 0) {
+          try {
+            const parsed = JSON.parse(stripped.slice(i, j + 1));
+            if (isPlainJsonObject(parsed)) {
+              candidates.push({ value: parsed, end: j + 1 });
+              i = j;
+            }
+          } catch {
+            /* not valid JSON; keep scanning */
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  if (!candidates.length) throw new Error(`No JSON object in answer: ${stripped.trim().slice(0, 160)}`);
+  candidates.sort((a, b) => a.end - b.end);
+  return candidates[candidates.length - 1].value;
+}
+
 const promptJsonRule = (schema: object) =>
   `\n\nRespond with ONLY a JSON object that matches this JSON Schema. No prose, no code fences.\n${JSON.stringify(schema)}`;
 
-async function openaiChat(p: ProviderId, model: string, r: ChatRequest, baseUrls: BaseUrls, record: (usage: Usage) => void): Promise<ChatResult> {
+async function openaiChat(p: ApiProviderId, model: string, r: ChatRequest, baseUrls: BaseUrls, record: (usage: Usage) => void): Promise<ChatResult> {
   const base = baseFor(p, baseUrls);
   const key = keyFor(p);
   if (!key) throw new ProviderError('no_key', `Set ${PROVIDERS[p].env} to use ${PROVIDERS[p].label}`);
@@ -270,8 +378,118 @@ async function anthropicChat(model: string, r: ChatRequest, record: (usage: Usag
   throw new ProviderError('provider_error', `Anthropic ${model} failed`);
 }
 
+let crewQueue: Promise<void> = Promise.resolve();
+function enqueueCrew<T>(fn: () => Promise<T>): Promise<T> {
+  const next = crewQueue.then(fn, fn);
+  crewQueue = next.then(() => {}, () => {});
+  return next;
+}
+
+const DEFAULT_CREW_TIMEOUT_MS = 15 * 60_000;
+
+async function crewChat(
+  model: string,
+  r: ChatRequest,
+  opts: { crewPath?: () => string; crewTimeoutMs?: number; beforeCrew?: () => void },
+  record: (usage: Usage) => void,
+): Promise<ChatResult> {
+  if (r.plugins) throw new ProviderError('no_search', 'Crew cannot perform X web search');
+  const { worker, effort } = parseCrewModel(model);
+  return enqueueCrew(async () => {
+    const crewPath = opts.crewPath?.()?.trim() ?? '';
+    if (!crewPath) throw new ProviderError('no_crew_path', 'Set crewPath in settings.local.json to use crew models');
+    opts.beforeCrew?.();
+
+    const dir = await mkdtemp(join(tmpdir(), 'ideagen-crew-'));
+    const workDir = join(dir, 'work');
+    const taskFile = join(dir, 'task.md');
+    const outFile = join(dir, 'out.md');
+    try {
+      await mkdir(workDir, { recursive: true });
+      const taskBody = [
+        '# System',
+        '',
+        r.system,
+        '',
+        '# Task',
+        '',
+        r.user,
+        '',
+        '# Output Format',
+        '',
+        `Reply with ONLY one JSON object matching this JSON schema (${r.schemaName}).`,
+        '',
+        '```json',
+        JSON.stringify(r.schema, null, 2),
+        '```',
+        '',
+      ].join('\n');
+      await writeFile(taskFile, taskBody, 'utf8');
+
+      const timeoutMs = r.timeoutMs ?? opts.crewTimeoutMs ?? DEFAULT_CREW_TIMEOUT_MS;
+      const timeoutMinutes = Math.max(1, Math.ceil(timeoutMs / 60_000));
+      const res = await runNoShell(
+        'python',
+        [
+          '-I', crewPath, worker,
+          '--task', taskFile,
+          '--dir', workDir,
+          '--out', outFile,
+          '--effort', effort,
+          '--timeout', String(timeoutMinutes),
+        ],
+        timeoutMs,
+      );
+      record(ZERO_USAGE);
+
+      const detail = (res.stderr || res.stdout || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+      if (res.killed || res.code === 4) {
+        throw new ProviderError('crew_timeout', detail || `Crew ${worker} timed out`);
+      }
+      if (res.error) {
+        throw new ProviderError('provider_error', `Crew ${worker} failed to start: ${res.error.message}`);
+      }
+      if (res.code === 3) {
+        throw new ProviderError('crew_signin', detail || `Crew ${worker} sign-in expired`);
+      }
+      if (res.code !== 0) {
+        throw new ProviderError('provider_error', detail || `Crew ${worker} failed (exit ${res.code})`);
+      }
+
+      let outText: string;
+      try {
+        outText = await readFile(outFile, 'utf8');
+      } catch {
+        throw new ProviderError('provider_error', `Crew ${worker} did not write out.md`);
+      }
+      try {
+        return { value: extractLastJson(outText), costUsd: 0 };
+      } catch (e: any) {
+        throw new ProviderError('provider_error', e?.message ?? String(e));
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 /** A chat function that routes every request by its "provider:model" string. */
-export function makeChat({ baseUrls = {}, log }: { baseUrls?: BaseUrls; log?: (attempt: ChatAttempt) => void } = {}): ChatFn {
+export function makeChat({
+  baseUrls = {},
+  log,
+  settings,
+  crewPath,
+  crewTimeoutMs,
+  beforeCrew,
+}: {
+  baseUrls?: BaseUrls;
+  log?: (attempt: ChatAttempt) => void;
+  settings?: () => AppSettings;
+  crewPath?: () => string;
+  crewTimeoutMs?: number;
+  beforeCrew?: () => void;
+} = {}): ChatFn {
+  const resolveCrewPath = crewPath ?? (() => settings?.().crewPath ?? '');
   return async (r) => {
     const { provider, model } = parseModel(r.model);
     let costUsd = 0;
@@ -280,15 +498,17 @@ export function makeChat({ baseUrls = {}, log }: { baseUrls?: BaseUrls; log?: (a
       r.onUsage?.(usage);
       if (r.role) log?.({ model: `${provider}:${model}`, boardId: r.boardId ?? null, role: r.role, ...usage });
     };
-    const out = provider === 'anthropic'
-      ? await anthropicChat(model, r, record)
-      : await openaiChat(provider, model, r, baseUrls, record);
+    const out = provider === 'crew'
+      ? await crewChat(model, r, { crewPath: resolveCrewPath, crewTimeoutMs, beforeCrew }, record)
+      : provider === 'anthropic'
+        ? await anthropicChat(model, r, record)
+        : await openaiChat(provider, model, r, baseUrls, record);
     return { ...out, costUsd };
   };
 }
 
 /** List a provider's models, also used as a connection test. */
-export async function listModels(p: ProviderId, baseUrls: BaseUrls = {}): Promise<string[]> {
+export async function listModels(p: ApiProviderId, baseUrls: BaseUrls = {}): Promise<string[]> {
   const base = baseFor(p, baseUrls);
   const key = keyFor(p);
   const get = async (url: string, headers: Record<string, string> = {}) => {

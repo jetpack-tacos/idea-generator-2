@@ -59,13 +59,35 @@ a { color: var(--accent); }
 
 /* ---------- top bar */
 #topbar {
-  display: flex; justify-content: space-between; align-items: center; gap: 12px;
-  padding: 8px 12px; border-bottom: 1px solid var(--line); background: rgba(15,17,22,.92); z-index: 5;
+  display: grid; gap: 4px;
+  padding: 8px 12px 6px; border-bottom: 1px solid var(--line); background: rgba(15,17,22,.92); z-index: 5;
+  min-width: 0; overflow: hidden;
 }
+.topbar-main { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-width: 0; }
 .bar-left, .bar-right { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .bar-left { flex: 1 1 auto; }
 .bar-right { flex: 0 1 auto; }
-#topbar { min-width: 0; overflow: hidden; }
+.status-strip {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  font-size: 11px; color: var(--muted); min-width: 0; padding-top: 2px;
+}
+.status-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.status-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px;
+  padding: 1px 8px; font-size: 11px; color: var(--text-2);
+}
+.status-chip.btn-chip { cursor: pointer; }
+.status-chip.btn-chip:hover { border-color: var(--accent); }
+.status-chip.ok { border-color: #2f6a55; color: #a6e6cd; }
+.status-chip.warn { border-color: #6b5521; color: var(--gold); }
+.status-chip.err { border-color: #6b2f35; color: #f3a6a6; background: rgba(230,103,103,.12); }
+.exists-mark {
+  margin: 10px 0; padding: 10px 12px; border-radius: var(--radius);
+  border: 1px solid #6b5521; background: rgba(245,197,66,.08); font-size: 13px;
+}
+.exists-mark.info { border-color: var(--line); background: var(--surface-2); }
+.exists-mark p { margin: 4px 0 0; color: var(--text-2); }
 .brand { font-weight: 800; letter-spacing: -.01em; margin-right: 4px; white-space: nowrap; }
 .title-input, .goal-input {
   background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 5px 8px; min-width: 0;

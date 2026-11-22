@@ -5,10 +5,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
-import type { Repo, Idea, Board } from './db.ts';
+import { localDay, type Repo, type Idea, type Board } from './db.ts';
 import { AppError, type Engine } from './engine.ts';
-import type { Autopilot } from './autopilot.ts';
-import { PROVIDERS, keyFor, listModels, type AppSettings, type ProviderId } from './providers.ts';
+import { nextLocalMidnight, type Autopilot } from './autopilot.ts';
+import { PROVIDERS, keyFor, listModels, type ApiProviderId, type AppSettings } from './providers.ts';
 import { mergeAppSettings } from './settings.ts';
 import { fitness, medal, scoreSum } from '../public/js/score.js';
 
@@ -17,7 +17,7 @@ export type Runtime = {
   set(s: AppSettings): void;
 };
 
-type Deps = { repo: Repo; engine: Engine; autopilot: Autopilot; runtime: Runtime; publicDir: string };
+type Deps = { repo: Repo; engine: Engine; autopilot: Autopilot; runtime: Runtime; publicDir: string; now?: () => number };
 
 const TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -58,7 +58,7 @@ function send(res: ServerResponse, status: number, body: unknown, type = 'applic
 const LABELS = {
   flow: 'Flow', ideas: 'ideas', exported: 'Exported', seed: 'Seed', source: 'Source', parents: 'Parents',
   originality: 'Use', feasibility: 'Buildable', impact: 'Fit', unjudged: 'Not judged',
-  handset: 'set by hand', project: 'Claude Code project',
+  handset: 'set by hand', project: 'Claude Code project', alreadyExists: 'Already exists',
   summary: 'Summary', strongest: 'Strongest', gaps: 'Gaps', next: 'Next steps', stale: 'The summary is older than the board',
 };
 const MEDAL_ICON = ['', '🥉 ', '🥈 ', '🥇 '];
@@ -103,6 +103,9 @@ export function boardMarkdown(board: Board, ideas: Idea[], edges: { from: number
     if (ps?.length) out.push(`${L.parents}: ${ps.map((p) => p.title).join(' × ')}`, '');
     else if (i.sourceUrl) out.push(`${L.seed} · ${L.source}: ${i.sourceUrl}`, '');
     else out.push(`${L.seed}`, '');
+    if (i.existsVerdict === 'exists') {
+      out.push(`${L.alreadyExists}: ${i.existsUrl ?? ''} ${i.existsReason ?? ''}`.trim(), '');
+    }
     if (i.projectPath) out.push(`${L.project}: \`${i.projectPath}\``, '');
   }
   return out.join('\n');
@@ -147,31 +150,64 @@ export function reportMarkdown(r: ReturnType<Repo['report']>) {
   return out.join('\n');
 }
 
-export function createHandler({ repo, engine, autopilot, runtime, publicDir }: Deps) {
+export function createHandler({ repo, engine, autopilot, runtime, publicDir, now = Date.now }: Deps) {
   const root = resolve(publicDir);
 
   function providerStatus() {
     return {
-      providers: (Object.keys(PROVIDERS) as ProviderId[]).map((id) => ({
+      providers: (Object.keys(PROVIDERS) as ApiProviderId[]).map((id) => ({
         id, label: PROVIDERS[id].label, env: PROVIDERS[id].env,
         search: !!PROVIDERS[id].search, keySource: keyFor(id) ? 'env' : null,
       })),
-      spentToday: repo.spentOn(null),
+      spentToday: repo.spentOn(null, localDay(new Date(now()))),
       spentTotal: repo.spentTotal(),
+    };
+  }
+
+  function appStatus() {
+    const t = now();
+    const day = localDay(new Date(t));
+    const s = runtime.get();
+    const crewCallsToday = repo.crewCallsOn(day);
+    return {
+      day,
+      spentTodayUsd: Math.round(repo.spentOn(null, day) * 10000) / 10000,
+      maxUsdPerDay: s.maxUsdPerDay,
+      crewCallsToday,
+      crewCallsPerDay: s.crewCallsPerDay,
+      crewPausedUntil: crewCallsToday >= s.crewCallsPerDay ? nextLocalMidnight(t) : null,
+      boards: repo.listBoards().map((b) => ({
+        id: b.id,
+        title: b.title,
+        mode: b.config.mode,
+        autopilot: b.config.mode === 'auto' ? autopilot.status(b.id) : { state: 'manual' },
+      })),
+      scouts: repo.listScoutRuns(),
     };
   }
 
   type Handler = (p: string[], body: any, url: URL) => Promise<unknown> | unknown;
   const routes: [string, RegExp, Handler][] = [
-    // ---- server settings
+    // ---- server settings & status
+    ['GET', /^\/api\/status$/, () => appStatus()],
     ['GET', /^\/api\/runtime-settings$/, () => runtime.get()],
     ['PUT', /^\/api\/runtime-settings$/, (_p, b) => {
       let next: AppSettings;
       try {
-        if (b?.judgeManyPath !== undefined && b.judgeManyPath !== runtime.get().judgeManyPath) {
+        const cur = runtime.get();
+        if (b?.judgeManyPath !== undefined && b.judgeManyPath !== cur.judgeManyPath) {
           throw new Error('Set judgeManyPath in settings.local.json');
         }
-        next = mergeAppSettings(b, runtime.get());
+        if (b?.crewPath !== undefined && b.crewPath !== cur.crewPath) {
+          throw new Error('Set crewPath in settings.local.json');
+        }
+        if (b?.sessionsPath !== undefined && b.sessionsPath !== cur.sessionsPath) {
+          throw new Error('Set sessionsPath in settings.local.json');
+        }
+        if (b?.alertCommand !== undefined && JSON.stringify(b.alertCommand) !== JSON.stringify(cur.alertCommand)) {
+          throw new Error('Set alertCommand in settings.local.json');
+        }
+        next = mergeAppSettings(b, cur);
       } catch (error: any) {
         throw new AppError(400, 'bad_settings', error.message);
       }
@@ -182,7 +218,7 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir }: D
     ['POST', /^\/api\/providers\/([a-z]+)\/models$/, async ([id]) => {
       if (!Object.hasOwn(PROVIDERS, id)) throw new AppError(404, 'not_found', 'Unknown provider');
       try {
-        return { models: await listModels(id as ProviderId) };
+        return { models: await listModels(id as ApiProviderId) };
       } catch (e: any) {
         throw new AppError(502, e?.code ?? 'provider_error', e?.message ?? String(e));
       }
@@ -211,7 +247,7 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir }: D
         spinoffs: repo.spinoffs(board.id),
         judging: ideas.filter((i) => engine.judging.has(i.id)).map((i) => i.id),
         autopilot: autopilot.status(board.id),
-        spentToday: repo.spentOn(board.id),
+        spentToday: repo.spentOn(board.id, localDay(new Date(now()))),
       };
     }],
     ['PATCH', /^\/api\/boards\/(\d+)$/, ([id], b) => {

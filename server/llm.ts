@@ -41,6 +41,30 @@ const EXPAND_SCHEMA = {
   required: ['ideas'],
   additionalProperties: false,
 };
+const DEEP_CROSS_SCHEMA = {
+  type: 'object',
+  properties: {
+    ideas: {
+      type: 'array',
+      description: 'Exactly 3 original ideas, each joining two or more parent ideas from the list in a non-obvious way.',
+      items: {
+        type: 'object',
+        properties: {
+          ...PITCH_PROPS,
+          parents: {
+            type: 'array',
+            description: 'Integer IDs of the 2 or more parent ideas from the list that this idea joins.',
+            items: { type: 'integer' },
+          },
+        },
+        required: ['title', 'pitch', 'parents'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['ideas'],
+  additionalProperties: false,
+};
 // The reason comes first so the model argues before it scores.
 const JUDGE_SCHEMA = {
   type: 'object',
@@ -208,6 +232,56 @@ export function makeLLM(chat: ChatFn) {
       const idea = tidy(value);
       if (!idea.title) throw new Error('The model returned no idea');
       return { idea, costUsd };
+    },
+
+    async deepCross(a: {
+      model: string;
+      board: BoardCtx;
+      candidates: { id: number; title: string; pitch: string; source: string; sum: number | null }[];
+      existingTitles: string[];
+    }) {
+      const listText = a.candidates
+        .map((c) => `[id:${c.id}] (${c.source}${c.sum != null ? `, jury ${c.sum}/15` : ''}) ${fmtIdea(c)}`)
+        .join('\n');
+      const user = [
+        'Below are the strongest seeds and ideas on this board from different sources.',
+        `Candidates:\n${listText}`,
+        'Generate exactly 3 original ideas that each join two or more of these candidates in a non-obvious, fertile way. Name the concrete mechanism that links the parents. For each idea, list the parent integer IDs it joins in `parents` (at least 2 IDs from the candidates above).',
+        context(a.board, a.existingTitles),
+        LANGUAGE_RULE,
+      ]
+        .filter(Boolean)
+        .join('\n\n');
+      const { value, costUsd } = await chat({
+        model: a.model,
+        system: 'You are an inventive cross-pollinator who finds unexpected, practical mechanisms connecting disparate tools, papers, and household needs.',
+        user,
+        schemaName: 'deep_cross',
+        schema: DEEP_CROSS_SCHEMA,
+        temperature: 0.9,
+        maxTokens: 2000,
+      });
+      const validIds = new Set(a.candidates.map((c) => c.id));
+      const byTitle = new Map(a.candidates.map((c) => [c.title.toLowerCase(), c.id]));
+      const rawIdeas = Array.isArray(value?.ideas) ? value.ideas : [];
+      const ideas: { title: string; pitch: string; parents: number[] }[] = [];
+      for (const item of rawIdeas) {
+        const cleaned = tidy(item);
+        if (!cleaned.title) continue;
+        const parents: number[] = [];
+        for (const rawParent of Array.isArray(item?.parents) ? item.parents : []) {
+          const n = typeof rawParent === 'number' ? rawParent : Number(String(rawParent).replace(/^id:/i, '').trim());
+          const resolved = Number.isInteger(n) && validIds.has(n)
+            ? n
+            : byTitle.get(String(rawParent ?? '').trim().toLowerCase());
+          if (resolved != null && !parents.includes(resolved)) parents.push(resolved);
+        }
+        if (parents.length < 2) continue;
+        ideas.push({ ...cleaned, parents });
+        if (ideas.length === 3) break;
+      }
+      if (!ideas.length) throw new Error('The deep cross returned no valid multi-parent ideas');
+      return { ideas, costUsd };
     },
 
     /** Turn a long text or a fetched web page into one seed idea. */

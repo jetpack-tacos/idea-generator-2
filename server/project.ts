@@ -35,6 +35,9 @@ type IdeaLike = {
   impact: number | null;
   reason: string | null;
   medalOverride: number | null;
+  existsVerdict?: string | null;
+  existsUrl?: string | null;
+  existsReason?: string | null;
   boardId?: number;
 };
 
@@ -188,7 +191,14 @@ async function uniqueDir(root: string, slug: string) {
 }
 
 export async function writeProject(a: {
-  root: string; brief: Brief; idea: IdeaLike; goal: string; lineage: IdeaLike[]; boardTitle: string; gitInit?: boolean;
+  root: string;
+  brief: Brief;
+  idea: IdeaLike;
+  goal: string;
+  lineage: IdeaLike[];
+  boardTitle: string;
+  exists?: { verdict: string; url?: string | null; reason?: string | null } | null;
+  gitInit?: boolean;
 }) {
   const root = resolve(expandHome(a.root));
   if (!isAbsolute(expandHome(a.root))) throw new Error(`The projects folder must be an absolute path or start with ~ (got "${a.root}")`);
@@ -217,9 +227,14 @@ export async function writeProject(a: {
     const scores = sum == null ? 'No jury scores yet.' :
       `Use ${a.idea.originality}/5 · Buildable ${a.idea.feasibility}/5 · Fit ${a.idea.impact}/5 (${sum}/15)`;
     const sources = [a.idea, ...a.lineage];
+    const ex = a.exists ?? (a.idea.existsVerdict ? { verdict: a.idea.existsVerdict, url: a.idea.existsUrl, reason: a.idea.existsReason } : null);
+    const existsLines = ex
+      ? ['', '## Already-exists check', '', `Verdict: ${ex.verdict}`, ...(ex.url ? [`Link: ${ex.url}`] : []), ...(ex.reason ? [`Reason: ${ex.reason}`] : [])]
+      : [];
     await writeFile(join(dir, 'NOTES.md'), [
-      `# ${a.idea.title}`, '', '## Jury verdict', '', 'Gold 🥇', scores, a.idea.reason ?? '', '',
-      '## Lineage', '', ...sources.map((i) => `- ${fmt(i)}${i.sourceUrl ? ` (${i.sourceUrl})` : ''}`), '',
+      `# ${a.idea.title}`, '', '## Jury verdict', '', 'Gold 🥇', scores, a.idea.reason ?? '',
+      ...existsLines,
+      '', '## Lineage', '', ...sources.map((i) => `- ${fmt(i)}${i.sourceUrl ? ` (${i.sourceUrl})` : ''}`), '',
     ].join('\n'));
   }
   await mkdir(join(dir, 'vault'));

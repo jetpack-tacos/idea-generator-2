@@ -32,6 +32,8 @@ async function fakeChat(r: ChatRequest) {
     : r.schemaName === 'summary' ? { headline: 'Tavlan rör sig mot ljud.', themes: [{ name: 'Ljud', insight: 'Allt låter.', ideas: ['Lånecyklar'] }], strongest: [{ title: 'Korsning', why: 'Konkret.' }], gaps: ['Ingen tänker på natten.'], nextSteps: ['Korsa A och B.'] }
     : r.schemaName === 'synthesis' ? { headline: 'Bänkarna dominerar.', insights: ['i1', 'i2', 'i3'], standouts: [{ title: 'Sjungande parkbänk', board: 'X', why: 'w' }], opportunities: ['o1', 'o2'], nextSteps: ['n1', 'n2'] }
     : r.schemaName === 'brief' ? { name: 'Sjungande bänk', slug: 'Sjungande Bänk!', oneLiner: 'En bänk som sjunger.', problem: 'P', audience: 'A', mvp: ['m1', 'm2'], outOfScope: ['o'], stack: 's', firstSteps: ['f1', 'f2'], openQuestions: ['q1'], risks: ['r1'] }
+    : r.schemaName === 'exists_queries' ? { queries: ['singing bench'] }
+    : r.schemaName === 'exists_verdict' ? { verdict: 'new', url: '', reason: 'Nothing close was found.' }
     : r.schemaName === 'leads' ? { leads: [
         { title: 'Trend A', summary: 'S', hook: 'H', url: 'https://x.com/a/status/1' },
         { title: 'Trend B', summary: 'S', hook: 'H', url: 'https://twitter.com/b/status/2?s=20' },
@@ -46,7 +48,8 @@ async function fakeChat(r: ChatRequest) {
 }
 
 const projectsRoot = mkdtempSync(join(tmpdir(), 'ideagen-projects-'));
-let settings: AppSettings = { ...structuredClone(DEFAULT_APP_SETTINGS), projectsRoot };
+// Crew models (the brief role's default) need a crew script path; the fake chat never runs it.
+let settings: AppSettings = { ...structuredClone(DEFAULT_APP_SETTINGS), projectsRoot, crewPath: join(projectsRoot, 'fake-crew.py') };
 const runtime = { get: () => settings, set: (next: AppSettings) => { settings = next; } };
 
 const repo = openDb(':memory:');
@@ -57,6 +60,11 @@ const pages: Record<string, { title: string; text: string }> = {
 };
 const engine = createEngine({
   repo, chat: fakeChat, settings: () => settings, gitInit: false,
+  // The already-exists check searches GitHub and Hacker News; here both find nothing.
+  searchTransport: (async (url: string | URL | Request) =>
+    new Response(String(url).includes('api.github.com') ? '{"items":[]}' : '{"hits":[]}', {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })) as typeof fetch,
   fetchPage: async (url) => {
     if (!pages[url]) throw new Error('HTTP 404');
     return pages[url];
@@ -184,7 +192,7 @@ test('each role uses its own model: app-wide setting, overridden per board', asy
   await api('POST', `/api/ideas/${s.id}/expand`, {});
   assert.equal(lastCall('expand').model, 'zai:glm-5.3-flash', 'an empty override falls back to the app setting');
   await engine.idle();
-  settings = { ...structuredClone(DEFAULT_APP_SETTINGS), projectsRoot };
+  settings = { ...structuredClone(DEFAULT_APP_SETTINGS), projectsRoot, crewPath: join(projectsRoot, 'fake-crew.py') };
 });
 
 test('board config is validated and clamped', async () => {

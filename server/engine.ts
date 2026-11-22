@@ -5,13 +5,15 @@
 
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import type { Repo, Idea, Board, StoredFind } from './db.ts';
+import { localDay, type Repo, type Idea, type Board, type StoredFind } from './db.ts';
 import { makeLLM } from './llm.ts';
 import { asUrl, fetchPage as realFetchPage } from './extract.ts';
 import { fetchPapers as realFetchPapers, researchLeads, xLeads } from './leads.ts';
 import { writeBrief, writeProject } from './project.ts';
 import { researchScores } from './scouts/filter.ts';
-import { ProviderError, type AppSettings, type ChatFn, type Role } from './providers.ts';
+import { checkIdeaExists } from './exists.ts';
+import { sendAlert } from './alert.ts';
+import { isCrewModel, ProviderError, type AppSettings, type ChatFn, type Role } from './providers.ts';
 import { fitness, isJudged, medal, scoreSum } from '../public/js/score.js';
 import { nextMove } from '../public/js/evolve.js';
 
@@ -64,18 +66,91 @@ function besideBoard(ideas: Idea[]) {
   return { x: maxX + 240, y: meanY + (Math.random() - 0.5) * 160 };
 }
 
+/** Pick up to 8 best judged seeds and ideas, covering >= 3 distinct sources when available. */
+export function selectDeepCrossCandidates(ideas: Idea[], edges: { from: number; to: number }[]) {
+  const judged = ideas
+    .filter((i) => isJudged(i))
+    .sort((a, b) => (scoreSum(b) ?? 0) - (scoreSum(a) ?? 0) || b.id - a.id);
+  if (judged.length < 2) return [];
+
+  const byId = new Map(ideas.map((i) => [i.id, i]));
+  const parents = new Map<number, number[]>();
+  for (const e of edges) {
+    if (!parents.has(e.to)) parents.set(e.to, []);
+    parents.get(e.to)!.push(e.from);
+  }
+  const cache = new Map<number, Set<string>>();
+  function sourcesOf(id: number): Set<string> {
+    if (cache.has(id)) return cache.get(id)!;
+    const out = new Set<string>();
+    const seen = new Set<number>();
+    const stack = [id];
+    while (stack.length) {
+      const curId = stack.pop()!;
+      if (seen.has(curId)) continue;
+      seen.add(curId);
+      const item = byId.get(curId);
+      if (!item) continue;
+      if (item.seedSource) out.add(item.seedSource);
+      else if (item.kind === 'seed' && item.generation === 0) out.add('manual');
+      for (const pid of parents.get(curId) ?? []) stack.push(pid);
+    }
+    if (!out.size) out.add('manual');
+    cache.set(id, out);
+    return out;
+  }
+
+  const picked: Idea[] = [];
+  const pickedIds = new Set<number>();
+  const coveredSources = new Set<string>();
+
+  // Pass 1: maximize source diversity (at least 3 sources when the board has them).
+  for (const idea of judged) {
+    if (picked.length >= 8) break;
+    const srcs = sourcesOf(idea.id);
+    const bringsNew = [...srcs].some((s) => !coveredSources.has(s));
+    if (bringsNew) {
+      picked.push(idea);
+      pickedIds.add(idea.id);
+      for (const s of srcs) coveredSources.add(s);
+    }
+  }
+
+  // Pass 2: fill up to 8 with the highest-scoring remaining judged ideas.
+  for (const idea of judged) {
+    if (picked.length >= 8) break;
+    if (pickedIds.has(idea.id)) continue;
+    picked.push(idea);
+    pickedIds.add(idea.id);
+  }
+
+  return picked
+    .sort((a, b) => (scoreSum(b) ?? 0) - (scoreSum(a) ?? 0) || b.id - a.id)
+    .map((i) => ({
+      id: i.id,
+      title: i.title,
+      pitch: i.pitch,
+      source: [...sourcesOf(i.id)].join(', '),
+      sum: scoreSum(i),
+    }));
+}
+
 type Deps = {
   repo: Repo;
   chat: ChatFn;
   settings: () => AppSettings;
   fetchPage?: typeof realFetchPage;
   fetchPapers?: typeof realFetchPapers;
+  searchTransport?: typeof fetch;
+  alertLogFile?: string;
   reveal?: (path: string) => void;
   gitInit?: boolean;
+  now?: () => number;
 };
 
 export function createEngine(deps: Deps) {
   const { repo } = deps;
+  const now = deps.now ?? Date.now;
   const fetchPage = deps.fetchPage ?? realFetchPage;
   const fetchPapers = deps.fetchPapers ?? realFetchPapers;
   const reveal = deps.reveal ?? ((p: string) => {
@@ -108,22 +183,34 @@ export function createEngine(deps: Deps) {
 
   async function call<T>(boardId: number, role: Role, fn: (llm: ReturnType<typeof makeLLM>, chat: ChatFn) => Promise<T>): Promise<T> {
     const chat: ChatFn = async (request) => {
+      const day = localDay(new Date(now()));
+      if (isCrewModel(request.model)) {
+        const { crewCallsPerDay, crewPath } = deps.settings();
+        if (!crewPath.trim()) {
+          throw new ProviderError('no_crew_path', 'Set crewPath in settings.local.json to use crew models');
+        }
+        if (repo.crewCallsOn(day) >= crewCallsPerDay) {
+          throw new ProviderError('crew_cap', `Daily crew limit (${crewCallsPerDay}) reached; resumes tomorrow`);
+        }
+        repo.addCrewCall(day);
+      }
       let recorded = false;
       const result = await deps.chat({
         ...request, boardId: boardId || undefined, role,
         onUsage(usage) {
           recorded = true;
-          repo.addSpend(boardId, usage.costUsd);
+          repo.addSpend(boardId, usage.costUsd, day);
         },
       });
-      if (!recorded) repo.addSpend(boardId, result.costUsd);
+      if (!recorded) repo.addSpend(boardId, result.costUsd, day);
       return result;
     };
     try {
       return await fn(makeLLM(chat), chat);
     } catch (e: any) {
       if (e instanceof AppError) throw e;
-      throw new AppError(502, e instanceof ProviderError ? e.code : 'llm_failed', e?.message ?? String(e));
+      const status = e instanceof ProviderError && e.code === 'crew_cap' ? 429 : 502;
+      throw new AppError(status, e instanceof ProviderError ? e.code : 'llm_failed', e?.message ?? String(e));
     }
   }
 
@@ -143,7 +230,16 @@ export function createEngine(deps: Deps) {
     const { brief } = await call(board.id, 'brief', (_llm, chat) => writeBrief({ chat, model: modelFor(board, 'brief'), idea, goal: board.goal, lineage }));
     let path: string;
     try {
-      path = await writeProject({ root: deps.settings().projectsRoot, brief, idea, goal: board.goal, lineage, boardTitle: board.title, gitInit: deps.gitInit });
+      path = await writeProject({
+        root: deps.settings().projectsRoot,
+        brief,
+        idea,
+        goal: board.goal,
+        lineage,
+        boardTitle: board.title,
+        exists: idea.existsVerdict ? { verdict: idea.existsVerdict, url: idea.existsUrl, reason: idea.existsReason } : null,
+        gitInit: deps.gitInit,
+      });
     } catch (e: any) {
       throw new AppError(500, 'project_failed', e?.message ?? String(e));
     }
@@ -162,6 +258,64 @@ export function createEngine(deps: Deps) {
     return pending;
   }
 
+  const existsInProgress = new Map<number, Promise<{ idea: Idea; project?: string; projectError?: string }>>();
+
+  async function runGoldPipeline(board: Board, idea: Idea): Promise<{ idea: Idea; project?: string; projectError?: string }> {
+    const current = mustIdea(idea.id);
+    if (current.projectPath) return { idea: current };
+    if (current.existsVerdict === 'exists') return { idea: current };
+
+    let checked = current;
+    if (checked.existsVerdict === null) {
+      if (checked.existsAttempts >= 3) return { idea: checked };
+      try {
+        const res = await call(board.id, 'exists', (_llm, chat) =>
+          checkIdeaExists({
+            chat,
+            model: modelFor(board, 'exists'),
+            idea: checked,
+            goal: board.goal,
+            transport: deps.searchTransport,
+          }),
+        );
+        checked = repo.saveExistsResult(checked.id, { verdict: res.verdict, url: res.url, reason: res.reason })!;
+        emitIdeas(board.id, [checked]);
+      } catch (e: any) {
+        checked = repo.incrementExistsAttempt(checked.id)!;
+        emitIdeas(board.id, [checked]);
+        return { idea: checked, projectError: e?.message ?? String(e) };
+      }
+
+      if (checked.existsVerdict === 'exists') {
+        await sendAlert(deps.settings().alertCommand, `Existing tool found: ${checked.title}`, { logFile: deps.alertLogFile });
+        return { idea: checked };
+      }
+    }
+
+    try {
+      const p = await createProject(checked);
+      bus.emit(board.id, { type: 'project', ideaId: checked.id, path: p.path, byJudge: true });
+      if (!p.existed) {
+        await sendAlert(deps.settings().alertCommand, `Gold idea: ${checked.title}`, { logFile: deps.alertLogFile });
+      }
+      return { idea: p.idea, project: p.path };
+    } catch (e: any) {
+      if (e?.code === 'crew_cap') {
+        bus.emit(board.id, { type: 'crew_paused', role: 'brief', message: e.message });
+      }
+      return { idea: checked, projectError: e?.message ?? String(e) };
+    }
+  }
+
+  function handleGold(board: Board, idea: Idea) {
+    let pending = existsInProgress.get(idea.id);
+    if (!pending) {
+      pending = runGoldPipeline(board, idea).finally(() => existsInProgress.delete(idea.id));
+      existsInProgress.set(idea.id, pending);
+    }
+    return pending;
+  }
+
   async function judge(ideaId: number) {
     const idea = mustIdea(ideaId);
     const board = mustBoard(idea.boardId);
@@ -174,17 +328,10 @@ export function createEngine(deps: Deps) {
         }),
       );
       repo.saveJudgement(idea.id, judgement);
-      const out: { idea: Idea; project?: string; projectError?: string } = { idea: repo.setKeywords(idea.id, judgement.keywords)! };
-      // The judge itself turns gold into a Claude Code project, if the board allows it.
+      let out: { idea: Idea; project?: string; projectError?: string } = { idea: repo.setKeywords(idea.id, judgement.keywords)! };
+      // On gold, check whether the tool already exists before creating a project folder.
       if (board.config.autoProjectOnGold && medal(out.idea) === 3 && !out.idea.projectPath) {
-        try {
-          const p = await createProject(out.idea);
-          out.idea = p.idea;
-          out.project = p.path;
-          bus.emit(board.id, { type: 'project', ideaId: idea.id, path: p.path, byJudge: true });
-        } catch (e: any) {
-          out.projectError = e?.message ?? String(e);
-        }
+        out = await handleGold(board, out.idea);
       }
       emitIdeas(board.id, [out.idea]);
       return out;
@@ -229,7 +376,7 @@ export function createEngine(deps: Deps) {
     const parent = mustIdea(parentId);
     const board = mustBoard(parent.boardId);
     const { ideas } = await call(board.id, 'expand', (llm) =>
-        llm.expand({ model: modelFor(board, 'expand'), flow: board.config.flow, board, idea: parent, existingTitles: titles(board.id) }),
+      llm.expand({ model: modelFor(board, 'expand'), flow: board.config.flow, board, idea: parent, existingTitles: titles(board.id) }),
     );
     const spots = arcPositions(parent, repo.parentsOf(parent.id)[0] ?? null, ideas.length);
     const created = ideas.map((i, n) =>
@@ -248,7 +395,7 @@ export function createEngine(deps: Deps) {
     const c = mustIdea(bId);
     if (a.boardId !== board.id || c.boardId !== board.id) throw new AppError(400, 'bad_pair', 'Ideas belong to another board');
     const { idea } = await call(board.id, 'combine', (llm) =>
-        llm.combine({ model: modelFor(board, 'combine'), flow: board.config.flow, board, a, b: c, existingTitles: titles(board.id) }),
+      llm.combine({ model: modelFor(board, 'combine'), flow: board.config.flow, board, a, b: c, existingTitles: titles(board.id) }),
     );
     const dx = c.x - a.x, dy = c.y - a.y, len = Math.hypot(dx, dy) || 1; // midpoint, nudged off the line
     const created = repo.insertIdea(
@@ -265,12 +412,65 @@ export function createEngine(deps: Deps) {
     return { idea: created, edges };
   }
 
+  async function deepCross(boardId: number) {
+    const board = mustBoard(boardId);
+    const allIdeas = repo.listIdeas(board.id);
+    const allEdges = repo.listEdges(board.id);
+    const candidates = selectDeepCrossCandidates(allIdeas, allEdges);
+    if (candidates.length < 2) return { ideas: [], edges: [] };
+
+    const { ideas } = await call(board.id, 'deep', (llm) =>
+      llm.deepCross({
+        model: modelFor(board, 'deep'),
+        board,
+        candidates,
+        existingTitles: titles(board.id),
+      }),
+    );
+
+    const byId = new Map(allIdeas.map((i) => [i.id, i]));
+    const created: Idea[] = [];
+    const edges: { from: number; to: number }[] = [];
+    ideas.forEach((item, idx) => {
+      const parentIdeas = item.parents.map((pid) => byId.get(pid)).filter((p): p is Idea => Boolean(p));
+      if (parentIdeas.length < 2) return;
+      const cx = parentIdeas.reduce((s, p) => s + p.x, 0) / parentIdeas.length;
+      const cy = parentIdeas.reduce((s, p) => s + p.y, 0) / parentIdeas.length;
+      const angle = (Math.PI * 2 * idx) / Math.max(ideas.length, 1);
+      const maxGen = Math.max(...parentIdeas.map((p) => p.generation));
+      const idea = repo.insertIdea(
+        {
+          boardId: board.id,
+          title: item.title,
+          pitch: item.pitch,
+          kind: 'combine',
+          x: cx + Math.cos(angle) * 90,
+          y: cy + Math.sin(angle) * 90,
+          generation: maxGen + 1,
+        },
+        item.parents,
+      );
+      created.push(idea);
+      for (const pid of item.parents) edges.push({ from: pid, to: idea.id });
+    });
+
+    repo.setDeepCrossDay(board.id, localDay(new Date(now())));
+    emitIdeas(board.id, created);
+    if (edges.length) bus.emit(board.id, { type: 'edges', edges });
+
+    const results = await Promise.allSettled(created.map((c) => judge(c.id)));
+    const failed = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+    if (failed && results.every((r) => r.status === 'rejected')) throw failed.reason;
+    return { ideas: created, edges };
+  }
+
   return {
     bus,
     judging,
     idle,
     queueJudge,
     modelFor,
+    deepCross,
 
     async seed(boardId: number, b: { text: string; x?: number; y?: number }) {
       const board = mustBoard(boardId);
@@ -291,13 +491,13 @@ export function createEngine(deps: Deps) {
         }
         if (page.text.length < 80) throw new AppError(422, 'url_no_text', `${url}: too little readable text`);
         const { idea } = await call(board.id, 'distill', (llm) =>
-        llm.distill({ model: modelFor(board, 'distill'), flow, board, text: [page.title, page.text].filter(Boolean).join('\n\n'), url }),
+          llm.distill({ model: modelFor(board, 'distill'), flow, board, text: [page.title, page.text].filter(Boolean).join('\n\n'), url }),
         );
         ({ title, pitch } = idea);
         sourceUrl = url;
       } else if (text.length > 160) {
         const { idea } = await call(board.id, 'distill', (llm) =>
-        llm.distill({ model: modelFor(board, 'distill'), flow, board, text }));
+          llm.distill({ model: modelFor(board, 'distill'), flow, board, text }));
         ({ title, pitch } = idea);
       }
       const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
@@ -464,14 +664,36 @@ export function createEngine(deps: Deps) {
     },
 
     /**
-     * One autopilot step: judge what is unjudged, otherwise breed (combine by
-     * tournament selection) or mutate (expand a strong idea). Awaits its own
-     * judgements so the next step sees the scores.
+     * One autopilot step: retry failed gold exists checks, judge what is unjudged,
+     * otherwise breed (combine by tournament selection) or mutate (expand a strong idea).
+     * Awaits its own judgements so the next step sees the scores.
      */
     async autoStep(boardId: number): Promise<{ did: 'idle' | 'judge' | 'expand' | 'combine'; reason?: string; ids?: number[] }> {
-      mustBoard(boardId);
+      const board = mustBoard(boardId);
       const ideas = repo.listIdeas(boardId);
       if (!ideas.length) return { did: 'idle', reason: 'empty' };
+
+      if (board.config.autoProjectOnGold) {
+        const pendingExists = ideas.find(
+          (i) => medal(i) === 3 && !i.projectPath && i.existsVerdict === null && i.existsAttempts < 3 && !judging.has(i.id),
+        );
+        if (pendingExists) {
+          await handleGold(board, pendingExists);
+          return { did: 'judge', ids: [pendingExists.id] };
+        }
+        const day = localDay(new Date(now()));
+        const briefCrewBlocked = isCrewModel(modelFor(board, 'brief')) && repo.crewCallsOn(day) >= deps.settings().crewCallsPerDay;
+        if (!briefCrewBlocked) {
+          const pendingBrief = ideas.find(
+            (i) => medal(i) === 3 && !i.projectPath && (i.existsVerdict === 'partial' || i.existsVerdict === 'new') && !judging.has(i.id),
+          );
+          if (pendingBrief) {
+            await handleGold(board, pendingBrief);
+            return { did: 'judge', ids: [pendingBrief.id] };
+          }
+        }
+      }
+
       const judgeAll = async (ids: number[]) => {
         const results = await Promise.allSettled(ids.map((id) => judge(id)));
         const failed = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
@@ -482,8 +704,17 @@ export function createEngine(deps: Deps) {
         await judgeAll(unjudged.map((i) => i.id));
         return { did: 'judge', ids: unjudged.map((i) => i.id) };
       }
-      const move = nextMove(ideas, repo.listEdges(boardId), { busy: judging });
+      const edges = repo.listEdges(boardId);
+      let move = nextMove(ideas, edges, { busy: judging });
       if (!move) return { did: 'idle', reason: 'nothing_to_do' };
+
+      const day = localDay(new Date(now()));
+      const crewAtCap = repo.crewCallsOn(day) >= deps.settings().crewCallsPerDay;
+      if (crewAtCap && move.type === 'expand' && isCrewModel(modelFor(board, 'expand')) && !isCrewModel(modelFor(board, 'combine'))) {
+        const alt = nextMove(ideas, edges, { busy: judging, mutationRate: 0 });
+        if (alt?.type === 'combine') move = alt;
+      }
+
       if (move.type === 'expand') {
         const r = await doExpand(move.idea.id);
         await judgeAll(r.ideas.map((i) => i.id));

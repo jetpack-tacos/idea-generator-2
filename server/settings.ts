@@ -45,11 +45,26 @@ export function mergeAppSettings(raw: any, base = DEFAULT_APP_SETTINGS): AppSett
       out.scoutIntervalsHours[source] = hours;
     }
   }
-  if (raw.judgeManyPath !== undefined) {
-    if (typeof raw.judgeManyPath !== 'string' || (raw.judgeManyPath.trim() && !isAbsolute(raw.judgeManyPath.trim()))) {
-      throw new Error('judgeManyPath must be empty or an absolute path');
+  for (const key of ['judgeManyPath', 'crewPath', 'sessionsPath'] as const) {
+    if (raw[key] !== undefined) {
+      if (typeof raw[key] !== 'string' || (raw[key].trim() && !isAbsolute(raw[key].trim()))) {
+        throw new Error(`${key} must be empty or an absolute path`);
+      }
+      out[key] = raw[key].trim();
     }
-    out.judgeManyPath = raw.judgeManyPath.trim();
+  }
+  if (raw.crewCallsPerDay !== undefined) {
+    const cap = raw.crewCallsPerDay;
+    if (!Number.isSafeInteger(cap) || cap < 0 || cap > 10000) {
+      throw new Error('crewCallsPerDay must be a nonnegative integer');
+    }
+    out.crewCallsPerDay = cap;
+  }
+  if (raw.alertCommand !== undefined) {
+    if (!Array.isArray(raw.alertCommand) || raw.alertCommand.some((x: unknown) => typeof x !== 'string' || !x.trim() || x.length > 500)) {
+      throw new Error('alertCommand must be an array of non-empty strings');
+    }
+    out.alertCommand = raw.alertCommand.map((x: string) => x.trim());
   }
   if (raw.interests !== undefined) {
     if (typeof raw.interests !== 'string') throw new Error('Interests must be text');

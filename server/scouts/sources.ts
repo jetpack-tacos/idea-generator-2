@@ -15,4 +15,5 @@ export const scouts = {
   'google-news': googleNews,
 } satisfies Record<string, Scout>;
 
-export type ScoutSource = keyof typeof scouts;
+export type PublicScoutSource = keyof typeof scouts;
+export type ScoutSource = PublicScoutSource | 'sessions';

@@ -17,25 +17,40 @@ export function startServer({
   dbFile = process.env.DB_FILE ?? join(root, 'data', 'ideas.db'),
   settingsFile = join(root, 'settings.local.json'),
   spendFile = SPEND_FILE,
+  alertLogFile,
   baseUrls,
   now,
   scoutSources,
+  sessionsScout,
+  searchTransport,
+  crewTimeoutMs,
+  gitInit,
+  autopilotTickMs,
 }: {
   port?: number;
   dbFile?: string;
   settingsFile?: string;
   spendFile?: string;
+  alertLogFile?: string;
   baseUrls?: NonNullable<Parameters<typeof makeChat>[0]>['baseUrls'];
   now?: () => number;
   scoutSources?: Parameters<typeof createScoutScheduler>[0]['sources'];
+  sessionsScout?: Parameters<typeof createScoutScheduler>[0]['sessionsScout'];
+  searchTransport?: typeof fetch;
+  crewTimeoutMs?: number;
+  gitInit?: boolean;
+  autopilotTickMs?: number;
 } = {}) {
   const runtime = openSettings(settingsFile);
   if (dbFile !== ':memory:') mkdirSync(dirname(dbFile), { recursive: true });
   const repo = openDb(dbFile);
-  const engine = createEngine({ repo, chat: makeChat({ baseUrls, log: spendLogger(spendFile) }), settings: runtime.get });
-  const autopilot = createAutopilot({ repo, engine, settings: runtime.get, now });
-  const scoutScheduler = createScoutScheduler({ repo, engine, settings: runtime.get, now, sources: scoutSources });
-  const server = createServer(createHandler({ repo, engine, autopilot, runtime, publicDir: join(root, 'public') }));
+  const chat = makeChat({ baseUrls, log: spendLogger(spendFile), settings: runtime.get, crewTimeoutMs });
+  const engine = createEngine({
+    repo, chat, settings: runtime.get, now, searchTransport, alertLogFile, gitInit,
+  });
+  const autopilot = createAutopilot({ repo, engine, settings: runtime.get, now, tickMs: autopilotTickMs });
+  const scoutScheduler = createScoutScheduler({ repo, engine, settings: runtime.get, now, sources: scoutSources, sessionsScout });
+  const server = createServer(createHandler({ repo, engine, autopilot, runtime, publicDir: join(root, 'public'), now }));
   server.once('listening', () => {
     autopilot.start();
     scoutScheduler.start();
@@ -44,7 +59,7 @@ export function startServer({
     autopilot.stop();
     void scoutScheduler.stop();
   });
-  return { server: server.listen(port, '127.0.0.1'), repo, engine, autopilot, scoutScheduler };
+  return { server: server.listen(port, '127.0.0.1'), repo, engine, autopilot, scoutScheduler, runtime };
 }
 
 if (import.meta.main) {

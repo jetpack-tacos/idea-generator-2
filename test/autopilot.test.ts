@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { backoffMs, createAutopilot, nextLocalMidnight, rateCheck, type RateInput } from '../server/autopilot.ts';
-import { openDb } from '../server/db.ts';
+import { localDay, openDb } from '../server/db.ts';
 import { createBus, createEngine } from '../server/engine.ts';
 import { DEFAULT_APP_SETTINGS, type ChatRequest } from '../server/providers.ts';
 
@@ -57,7 +57,8 @@ function fakeEngineFor(repo: ReturnType<typeof openDb>) {
       async autoStep(boardId: number) {
         if (fail) throw Object.assign(new Error('no key'), { code: 'no_key' });
         steps.push(boardId);
-        repo.addSpend(boardId, 0.3);
+        // Spend lands on the test clock's day, as the autopilot reads it.
+        repo.addSpend(boardId, 0.3, localDay(new Date(T)));
         return { did: 'combine' as const };
       },
     } as any,

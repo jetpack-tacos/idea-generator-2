@@ -9,25 +9,28 @@
 </head>
 <body>
   <header id="topbar">
-    <div class="bar-left">
-      <span class="brand" data-i18n="appName">Idea Generator</span>
-      <div class="menu-wrap">
-        <button id="board-menu-btn" class="btn ghost" aria-haspopup="true"></button>
-        <div id="board-menu" class="menu" hidden></div>
+    <div class="topbar-main">
+      <div class="bar-left">
+        <span class="brand" data-i18n="appName">Idea Generator</span>
+        <div class="menu-wrap">
+          <button id="board-menu-btn" class="btn ghost" aria-haspopup="true"></button>
+          <div id="board-menu" class="menu" hidden></div>
+        </div>
+        <input id="board-title" class="title-input" data-i18n-title="title" spellcheck="false">
+        <input id="board-goal" class="goal-input" data-i18n-title="goal">
+        <span id="board-origin"></span>
       </div>
-      <input id="board-title" class="title-input" data-i18n-title="title" spellcheck="false">
-      <input id="board-goal" class="goal-input" data-i18n-title="goal">
-      <span id="board-origin"></span>
+      <div class="bar-right">
+        <button id="mode-toggle" class="mode" aria-pressed="false"></button>
+        <span id="ap-status" class="ap-chip" aria-live="polite"></span>
+        <button id="leads-btn" class="btn ghost" aria-expanded="false" data-i18n="leads"></button>
+        <button id="report-btn" class="btn ghost" data-i18n="report"></button>
+        <button id="export-btn" class="btn ghost" data-i18n="export"></button>
+        <button id="board-settings-btn" class="icon-btn" data-i18n-title="boardSettings">⚙</button>
+        <button id="app-settings-btn" class="icon-btn" data-i18n-title="appSettings">⚙</button>
+      </div>
     </div>
-    <div class="bar-right">
-      <button id="mode-toggle" class="mode" aria-pressed="false"></button>
-      <span id="ap-status" class="ap-chip" aria-live="polite"></span>
-      <button id="leads-btn" class="btn ghost" aria-expanded="false" data-i18n="leads"></button>
-      <button id="report-btn" class="btn ghost" data-i18n="report"></button>
-      <button id="export-btn" class="btn ghost" data-i18n="export"></button>
-      <button id="board-settings-btn" class="icon-btn" data-i18n-title="boardSettings">⚙</button>
-      <button id="app-settings-btn" class="icon-btn" data-i18n-title="appSettings">⚙</button>
-    </div>
+    <div id="status-strip" class="status-strip" aria-live="polite"></div>
   </header>
 
   <main>

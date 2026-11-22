@@ -11,5 +11,7 @@ vault/
 demo/
 settings.local.json
 sources.local.json
+reference.local.json
 settings.local.json.*.tmp
 logs/spend.jsonl
+logs/alerts.log

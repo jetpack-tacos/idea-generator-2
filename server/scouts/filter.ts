@@ -1,12 +1,9 @@
-import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
+import { runNoShell } from '../alert.ts';
 import type { StoredFind } from '../db.ts';
 import type { ChatFn } from '../providers.ts';
-
-const run = promisify(execFile);
 
 const FIT = {
   type: 'noul',
@@ -14,6 +11,25 @@ const FIT = {
   criteria: {
     true_description: 'It points to a tool, technique, device, dataset or idea that could plausibly be adapted into something useful at home or for a hobby listed in the context.',
     false_description: 'It is news, politics, finance, sports results, drama or a product announcement with nothing to adapt.',
+  },
+};
+
+export const SESSION_QUESTIONS = {
+  wish: {
+    type: 'noul',
+    instructions: 'Does this message express a wish for a tool, a frustration with a task, or a need that something could be built for?',
+    criteria: {
+      true_description: 'The message expresses a wish for a tool, a frustration with a task, or a need that something could be built for.',
+      false_description: 'Routine coding instructions, factual questions, greetings, or pasted logs with no unmet tool need.',
+    },
+  },
+  personal: {
+    type: 'noul',
+    instructions: 'Does this message contain personal details: names of people, health, money, accounts, addresses, or anything private?',
+    criteria: {
+      true_description: 'Contains names of people, health info, money, accounts, addresses, credentials, or anything private.',
+      false_description: 'Generic workflow, tool, or technical frustration with no personal or private details.',
+    },
   },
 };
 
@@ -35,14 +51,13 @@ export async function judgeMany(path: string, context: string, finds: StoredFind
       writeFile(input, items(finds).map((item) => JSON.stringify(item)).join('\n') + '\n'),
       writeFile(contextFile, context),
     ]);
-    try {
-      await run('python', [
-        '-I', path, '--questions', questions, '--items', input, '--out', output, '--public',
-        '--task', 'idea-generator filter', '--context-file', contextFile,
-      ], { timeout: 600_000, windowsHide: true });
-    } catch (error: any) {
-      // execFile errors contain command arguments and can include script output.
-      throw new Error(`judge_many ${error.killed ? 'timed out' : `failed (${error.code ?? 'unknown error'})`}`);
+    const res = await runNoShell('python', [
+      '-I', path, '--questions', questions, '--items', input, '--out', output, '--public',
+      '--task', 'idea-generator filter', '--context-file', contextFile,
+    ], 600_000);
+    if (res.killed) throw new Error('judge_many timed out');
+    if (res.error || res.code !== 0) {
+      throw new Error(`judge_many failed (${res.error?.message ?? res.code ?? 'unknown error'})`);
     }
     const latest = new Map<string, any>();
     for (const line of (await readFile(output, 'utf8')).split(/\r?\n/)) {
@@ -57,6 +72,50 @@ export async function judgeMany(path: string, context: string, finds: StoredFind
       if (row?.ok === true && validScore(score)) scores.set(id, score);
     }
     return scores;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+export type SessionJudgement = { wish: number; personal: number };
+
+/** Private route for local user messages: never passes --public. */
+export async function judgeManySessions(
+  path: string,
+  sessionItems: { id: string; text: string }[],
+  timeoutMs = 600_000,
+): Promise<Map<string, SessionJudgement>> {
+  const dir = await mkdtemp(join(tmpdir(), 'ideagen-sessions-'));
+  try {
+    const [questions, input, output] = ['questions.json', 'items.jsonl', 'out.jsonl'].map((file) => join(dir, file));
+    await Promise.all([
+      writeFile(questions, JSON.stringify(SESSION_QUESTIONS)),
+      writeFile(input, sessionItems.map((item) => JSON.stringify(item)).join('\n') + '\n'),
+    ]);
+    const res = await runNoShell('python', [
+      '-I', path, '--questions', questions, '--items', input, '--out', output,
+      '--task', 'idea-generator sessions',
+    ], timeoutMs);
+    if (res.killed) throw new Error('judge_many timed out');
+    if (res.error || res.code !== 0) {
+      throw new Error(`judge_many failed (${res.error?.message ?? res.code ?? 'unknown error'})`);
+    }
+    const latest = new Map<string, any>();
+    for (const line of (await readFile(output, 'utf8')).split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const row = JSON.parse(line);
+      latest.set(String(row.id), row);
+    }
+    const results = new Map<string, SessionJudgement>();
+    for (const { id } of sessionItems) {
+      const row = latest.get(id);
+      const wish = row?.answers?.wish?.noul;
+      const personal = row?.answers?.personal?.noul;
+      if (row?.ok === true && validScore(wish) && validScore(personal)) {
+        results.set(id, { wish, personal });
+      }
+    }
+    return results;
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
