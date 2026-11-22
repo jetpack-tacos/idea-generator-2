@@ -415,7 +415,7 @@ export function makeLLM(chat: ChatFn) {
         schemaName: 'judgement',
         schema: JUDGE_SCHEMA,
         temperature: 0.2,
-        maxTokens: 1200, // room for the reason and keywords; 400 cut DeepSeek off mid-answer (2026-11-22)
+        maxTokens: 2500, // DeepSeek used 1167 tokens on one verdict; 400 cut it off mid-answer (2026-11-22)
       });
       if (typeof value?.reason !== 'string' || !value.reason.trim() ||
           ![value.originality, value.feasibility, value.impact].every(Number.isFinite)) {
