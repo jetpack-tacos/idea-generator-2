@@ -64,7 +64,10 @@ export function createScoutScheduler(deps: {
 
     // From here through insertion there is no await, so overlapping rounds cannot score the same find.
     const t = now();
-    const finds = repo.addFinds(batches.flat(), t);
+    const added = repo.addFinds(batches.flat(), t);
+    // Also retry finds from the last 24 hours whose scoring failed or was cut off.
+    const addedIds = new Set(added.map((f) => f.id));
+    const finds = [...added, ...repo.unscoredFinds(t - DAY).filter((f) => !addedIds.has(f.id) && f.source !== 'sessions')];
     if (sessionFinds.length) {
       // Session finds are already privately scored (wish >= 0.7) and must NEVER reach --public or cloud models.
       repo.addFinds(sessionFinds, t);

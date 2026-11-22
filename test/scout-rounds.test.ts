@@ -111,7 +111,7 @@ test('a failed Python filter falls back in batches of ten through the board rese
     const { context, items } = JSON.parse(req.user);
     assert.match(context, /TEST goal[\s\S]+TEST interests/);
     batches.push(items.length);
-    return { costUsd: 0.01, value: { scores: items.map(({ id }: { id: string }) => ({ id, fit: 0.4 })) } };
+    return { costUsd: 0.01, value: { scores: items.map(({ id }: { id: string }) => ({ id, fit: 0.35 })) } };
   };
   const logs: string[] = [];
   const engine = createEngine({ repo, chat, settings });
@@ -123,6 +123,36 @@ test('a failed Python filter falls back in batches of ten through the board rese
   await scout.tick();
   assert.deepEqual(batches, [10, 10, 1]);
   assert.equal(repo.spentTotal().calls, 3);
-  assert.ok(repo.latestFinds().every((find) => find.score === 0.4 && find.seededIdeaId === null));
+  assert.ok(repo.latestFinds().every((find) => find.score === 0.35 && find.seededIdeaId === null));
   assert.match(logs.join('\n'), /judge_many filter failed: judge_many failed \(3\)[\s\S]+research model filter for 21 new finds/);
+});
+
+test('seeding takes the best find of each source before any second-best', () => {
+  const repo = openDb(':memory:');
+  const added = repo.addFinds([
+    draft('github-trending', 1), draft('github-trending', 2), draft('github-trending', 3),
+    draft('hackernews', 4), draft('google-news', 5),
+  ], start);
+  const score = new Map(added.map((f) => [f.id, f.source === 'github-trending' ? 0.95 - f.id * 0.01 : 0.7]));
+  repo.saveFindScores(score);
+  const picked = repo.seedableFinds(0.6, 3).map((f) => f.source).sort();
+  assert.deepEqual(picked, ['github-trending', 'google-news', 'hackernews'], 'one per source while sources remain');
+  assert.equal(repo.seedableFinds(0.6, 5).length, 5, 'then the next best of each source');
+  repo.close();
+});
+
+test('finds whose scoring failed are retried for 24 hours, sessions never', () => {
+  const repo = openDb(':memory:');
+  repo.addFinds([draft('hackernews', 1)], start - 25 * HOUR);
+  repo.addFinds([draft('lobsters', 2), draft('sessions', 3)], start - 2 * HOUR);
+  assert.deepEqual(repo.unscoredFinds(start - 24 * HOUR).map((f) => f.source), ['lobsters']);
+  repo.close();
+});
+
+test("a source's single best find seeds from 0.4; its others still need the threshold", () => {
+  const repo = openDb(':memory:');
+  const added = repo.addFinds([draft('google-news', 1), draft('google-news', 2), draft('google-news', 3)], start);
+  repo.saveFindScores(new Map([[added[0].id, 0.45], [added[1].id, 0.44], [added[2].id, 0.3]]));
+  assert.deepEqual(repo.seedableFinds(0.6, 6).map((f) => f.id), [added[0].id]);
+  repo.close();
 });

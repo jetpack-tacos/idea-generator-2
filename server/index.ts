@@ -9,6 +9,7 @@ import { createScoutScheduler } from './scouts/scheduler.ts';
 import { createHandler } from './app.ts';
 import { openSettings } from './settings.ts';
 import { SPEND_FILE, spendLogger } from './spend.ts';
+import { teeConsoleToFile } from './log-file.ts';
 
 const root = join(import.meta.dirname, '..');
 
@@ -63,6 +64,7 @@ export function startServer({
 }
 
 if (import.meta.main) {
+  teeConsoleToFile(join(root, 'logs', 'server.log'));
   const { server } = startServer();
   server.on('listening', () => {
     const address = server.address();

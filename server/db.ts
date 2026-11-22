@@ -655,6 +655,12 @@ export function openDb(file: string) {
         return added;
       });
     },
+    /** Finds still unscored (a failed or interrupted filter run) first seen at or after `since`. */
+    unscoredFinds(since: number): StoredFind[] {
+      return db.prepare(`
+        SELECT * FROM finds WHERE score IS NULL AND source != 'sessions' AND first_seen >= ? ORDER BY id
+      `).all(since).map(findFromRow);
+    },
     getFind(id: number): StoredFind | null {
       const row = db.prepare('SELECT * FROM finds WHERE id = ?').get(id);
       return row ? findFromRow(row) : null;
@@ -677,9 +683,17 @@ export function openDb(file: string) {
       return db.prepare('DELETE FROM finds WHERE first_seen <= ?').run(cutoff).changes;
     },
     seedableFinds(threshold: number, count: number): StoredFind[] {
+      // Best find of each source first, then each source's second best, and so on,
+      // so one strong source cannot fill every seed slot (cross-pollination needs variety).
+      // Each source's single best find also counts from SOURCE_BEST_FLOOR, so a source whose finds
+      // rarely clear the threshold (news) still takes part.
       return db.prepare(`
-        SELECT * FROM finds WHERE score >= ? AND seeded_idea_id IS NULL ORDER BY score DESC, id LIMIT ?
-      `).all(threshold, count).map(findFromRow);
+        SELECT * FROM (
+          SELECT *, ROW_NUMBER() OVER (PARTITION BY source ORDER BY score DESC, id) AS rank_in_source
+          FROM finds WHERE score >= ? AND seeded_idea_id IS NULL
+        ) WHERE score >= ? OR rank_in_source = 1
+        ORDER BY rank_in_source, score DESC, id LIMIT ?
+      `).all(Math.min(threshold, SOURCE_BEST_FLOOR), threshold, count).map(findFromRow);
     },
     seedFind(boardId: number, id: number, at: { x: number; y: number }) {
       return tx(() => {
@@ -842,6 +856,9 @@ export function openDb(file: string) {
 export type Repo = ReturnType<typeof openDb>;
 
 /** YYYY-MM-DD in local time: budgets reset at local midnight. */
+/** A source's best unseeded find may seed from this score even below the seed threshold. */
+export const SOURCE_BEST_FLOOR = 0.4;
+
 export function localDay(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }

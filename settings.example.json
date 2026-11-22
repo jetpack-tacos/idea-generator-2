@@ -29,9 +29,14 @@
   "judgeManyPath": "",
   "crewPath": "C:/path/to/crew.py",
   "crewCallsPerDay": 10,
-  "alertCommand": ["python", "-I", "C:/path/to/send_alert.py", "{title}"],
+  "alertCommand": [
+    "python",
+    "-I",
+    "C:/path/to/send_alert.py",
+    "{title}"
+  ],
   "sessionsPath": "",
   "interests": "",
   "seedThreshold": 0.6,
-  "seedsPerRound": 3
+  "seedsPerRound": 6
 }

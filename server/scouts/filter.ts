@@ -9,8 +9,8 @@ const FIT = {
   type: 'noul',
   instructions: 'Would someone with the interests described in the context find this a useful spark for a project they could build for their own household or hobby?',
   criteria: {
-    true_description: 'It points to a tool, technique, device, dataset or idea that could plausibly be adapted into something useful at home or for a hobby listed in the context.',
-    false_description: 'It is news, politics, finance, sports results, drama or a product announcement with nothing to adapt.',
+    true_description: 'It points to a tool, technique, device, dataset or discovery, or reports a problem, trend or situation, that suggests something useful to build at home or for a hobby listed in the context.',
+    false_description: 'Politics, markets, sports results, celebrity, crime or disaster news, or a product announcement, with nothing in it to build on.',
   },
 };
 
