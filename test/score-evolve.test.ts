@@ -30,7 +30,7 @@ test('scores are clamped to whole numbers 1–5', () => {
   assert.deepEqual([0, 1, 2.6, 5, 9, 'x', null].map(clampScore), [1, 1, 3, 5, 5, 1, 1]);
 });
 
-test('equal-fitness descendants prefer different seed sources; stronger and single-source pairs still breed', () => {
+test('the partner comes from a different seed source when one exists; single-source pairs breed only when none does', () => {
   const seed = (id: number, seedSource: string) => idea(id, null, { kind: 'seed', generation: 0, seedSource });
   const ideas = [seed(1, 'papers'), seed(2, 'papers'), seed(3, 'lobsters'), idea(4, 12), idea(5, 12), idea(6, 12)];
   const edges = [{ from: 1, to: 4 }, { from: 2, to: 5 }, { from: 3, to: 6 }];
@@ -41,7 +41,7 @@ test('equal-fitness descendants prefer different seed sources; stronger and sing
   }
   assert.equal(choose()?.b?.id, 6);
   ideas[5] = idea(6, 11);
-  assert.equal(choose()?.b?.id, 5);
+  assert.equal(choose()?.b?.id, 6, 'a weaker partner from another source beats a stronger one from the same source');
   ideas[5] = idea(6, 12);
   ideas[2] = seed(3, 'papers');
   assert.equal(choose()?.b?.id, 5);

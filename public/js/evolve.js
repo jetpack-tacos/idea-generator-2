@@ -108,7 +108,10 @@ export function nextMove(ideas, edges, opts = {}) {
       const rest = pool.filter((i) => i.id !== a.id);
       const aSources = sourcesOf(a.id);
       const crosses = (idea) => crossesSources(aSources, sourcesOf(idea.id));
-      const b = tournament(rest, k, rng, (candidate, best) => crosses(candidate) && !crosses(best));
+      // Cross-pollination is the point (Jer 2026-11-22 2:32 PM): the partner comes from a different
+      // source whenever one exists. As a mere tie-break, 9 of the first 13 crosses stayed within one source.
+      const crossing = rest.filter(crosses);
+      const b = tournament(crossing.length ? crossing : rest, k, rng);
       const key = pairKey(a.id, b.id);
       if (used.has(key) || inFlight.has(key)) continue;
       return { type: 'combine', a, b };
