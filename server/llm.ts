@@ -98,6 +98,24 @@ function householdText(board: BoardCtx) {
 ${h}` : '';
 }
 
+const PLAIN_WORDS = new Set(['household', 'with', 'from', 'that', 'this', 'your', 'into', 'idea', 'ideas', 'home', 'family']);
+
+/**
+ * Words that keep coming back in the board's titles. Seen 2026-11-22: "rounds" in 10 of 50 titles,
+ * "autopsy" in 6, because each new idea borrowed the theme its parent had borrowed.
+ */
+export function overusedWords(titles: string[], max = 10): string[] {
+  const counts = new Map<string, number>();
+  for (const title of titles) {
+    for (const word of new Set(title.toLowerCase().match(/[a-z]{4,}/g) ?? [])) {
+      if (!PLAIN_WORDS.has(word)) counts.set(word, (counts.get(word) ?? 0) + 1);
+    }
+  }
+  const floor = Math.max(4, Math.ceil(titles.length * 0.08));
+  return [...counts].filter(([, n]) => n >= floor)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, max).map(([word]) => word);
+}
+
 function context(board: BoardCtx, existingTitles: string[]) {
   const parts: string[] = [];
   const household = householdText(board);
@@ -112,6 +130,11 @@ function context(board: BoardCtx, existingTitles: string[]) {
         .slice(-40)
         .map((t) => `- ${t}`)
         .join('\n')}`,
+    );
+  const overused = overusedWords(existingTitles);
+  if (overused.length)
+    parts.push(
+      `Themes already worn out on this board: ${overused.join(', ')}. Do not use these words in the title, and do not borrow a metaphor or field the board has already used (for example hospital rounds or autopsies when "rounds" or "autopsy" is listed). If you borrow a mechanism, take it from a field none of these ideas came from.`,
     );
   return parts.join('\n\n');
 }

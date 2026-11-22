@@ -89,6 +89,7 @@ for (const [provider, model, key, cache, cost] of [
     } else {
       assert.ok(!('reasoning_effort' in seen[0].body), 'deepseek must not send unsolicited reasoning_effort');
     }
+    assert.ok(seen[0].body.max_tokens >= 4000, 'flash models think first, so the answer limit leaves room for the answer');
     assert.ok(!('thinking' in seen[0].body));
 
     seen.length = attempts.length = 0;

@@ -279,6 +279,9 @@ async function openaiChat(p: ApiProviderId, model: string, r: ChatRequest, baseU
     body.reasoning_effort = 'low';
     body.max_tokens = Math.max(body.max_tokens, 4000);
   }
+  // deepseek-flash thinks before answering and the thinking counts against max_tokens: on 2026-11-22 a cross
+  // used all 1200 tokens thinking and returned an empty answer three times in a row.
+  if (p === 'deepseek') body.max_tokens = Math.max(body.max_tokens, 4000);
   if (p === 'openrouter') {
     body.reasoning = { enabled: false };
     body.usage = { include: true };
