@@ -10,7 +10,8 @@ export type { ChatFn, ChatRequest } from './providers.ts';
 
 type Pitch = { title: string; pitch: string };
 type Flow = { system: string; expand: string; combine: string };
-type BoardCtx = { goal: string };
+/** household: the owner's description of the household (from settings.interests), shared with every idea prompt and the jury. */
+type BoardCtx = { goal: string; household?: string };
 export type Judgement = { originality: number; feasibility: number; impact: number; reason: string; keywords: string[] };
 
 /** One canonical form so "Public Spaces" and "public space" count as one trend. */
@@ -91,8 +92,16 @@ const JUDGE_SCHEMA = {
 const LANGUAGE_RULE = 'Write in the language of the source ideas or seed text. If unclear or mixed, write in English.';
 
 
+function householdText(board: BoardCtx) {
+  const h = board.household?.trim();
+  return h ? `The household these ideas are for (only assume devices, hobbies and routines named here):
+${h}` : '';
+}
+
 function context(board: BoardCtx, existingTitles: string[]) {
   const parts: string[] = [];
+  const household = householdText(board);
+  if (household) parts.push(household);
   if (board.goal.trim())
     parts.push(
       `The board's goal (the general direction): ${board.goal.trim()}\nEvery idea must serve this goal. Keep the source idea's substance, but steer it toward the goal.`,
@@ -392,6 +401,7 @@ export function makeLLM(chat: ChatFn) {
       const system = guidance ? `${JUDGE_SYSTEM}\n\nAdditional guidance from this board's facilitator:\n${guidance}` : JUDGE_SYSTEM;
       const user = [
         a.board.goal.trim() ? `The board's goal (the general direction): ${a.board.goal.trim()}` : '',
+        householdText(a.board),
         `The idea:\n${fmtIdea(a.idea)}`,
         'Write the reason in the language of the idea, or English if unclear.',
         a.vocabulary?.length ? `Keyword vocabulary in use (reuse when one fits): ${a.vocabulary.join(', ')}` : '',

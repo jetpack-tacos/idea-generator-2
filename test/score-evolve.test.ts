@@ -150,3 +150,26 @@ test('evolution stats leave seeds out and compare first and latest windows', () 
   assert.equal(s.generation, 5);
   assert.equal(evolutionStats(ideas.slice(0, 5)).latest, null, 'no "latest" until there is more than one window');
 });
+
+test('idea prompts and the jury carry the household description', async () => {
+  const { openDb } = await import('../server/db.ts');
+  const { createEngine } = await import('../server/engine.ts');
+  const { DEFAULT_APP_SETTINGS } = await import('../server/providers.ts');
+  const repo = openDb(':memory:');
+  const seen: Record<string, string> = {};
+  const chat = async (r: any) => {
+    seen[r.schemaName] = `${r.system}\n${r.user}`;
+    return r.schemaName === 'judgement'
+      ? { value: { reason: 'r', originality: 2, feasibility: 2, impact: 2, keywords: ['k'] }, costUsd: 0 }
+      : { value: { ideas: [1, 2, 3].map((k) => ({ title: `E${k}`, pitch: 'p' })) }, costUsd: 0 };
+  };
+  const settings = () => ({ ...DEFAULT_APP_SETTINGS, interests: 'TEST HOUSEHOLD: no 3D printer.' });
+  const engine = createEngine({ repo, chat, settings, gitInit: false });
+  const board = repo.createBoard({ title: 'B', goal: 'G' });
+  const seed = repo.insertIdea({ boardId: board.id, title: 'S', pitch: 'p', kind: 'seed', x: 0, y: 0, generation: 0 });
+  await engine.judge(seed.id);
+  await engine.autoStep(board.id);
+  assert.match(seen.judgement, /TEST HOUSEHOLD: no 3D printer\./);
+  assert.match(seen.expand, /TEST HOUSEHOLD: no 3D printer\./);
+  repo.close();
+});

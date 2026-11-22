@@ -172,6 +172,8 @@ export function createEngine(deps: Deps) {
     return i;
   };
   const modelFor = (board: Board, role: Role) => board.config.models[role] || deps.settings().models[role];
+  /** The board plus the owner's household description, for idea prompts and the jury. */
+  const withHousehold = (board: Board) => ({ ...board, household: deps.settings().interests ?? '' });
   const titles = (boardId: number) => repo.listIdeas(boardId).map((i) => i.title);
   const emitIdeas = (boardId: number, ideas: Idea[]) => ideas.length && bus.emit(boardId, { type: 'ideas', ideas });
   const seedPosition = (boardId: number, at: { x?: number; y?: number }) =>
@@ -387,7 +389,7 @@ export function createEngine(deps: Deps) {
     try {
       const { judgement } = await call(board.id, 'judge', (llm) =>
         llm.judge({
-          model: modelFor(board, 'judge'), board, idea,
+          model: modelFor(board, 'judge'), board: withHousehold(board), idea,
           guidance: board.config.judgeGuidance, vocabulary: repo.keywordVocabulary(),
         }),
       );
@@ -468,7 +470,7 @@ export function createEngine(deps: Deps) {
     const parent = mustIdea(parentId);
     const board = mustBoard(parent.boardId);
     const { ideas } = await call(board.id, 'expand', (llm) =>
-      llm.expand({ model: modelFor(board, 'expand'), flow: board.config.flow, board, idea: parent, existingTitles: titles(board.id) }),
+      llm.expand({ model: modelFor(board, 'expand'), flow: board.config.flow, board: withHousehold(board), idea: parent, existingTitles: titles(board.id) }),
     );
     const liveParent = repo.getIdea(parent.id);
     if (!liveParent) throw new AppError(404, 'not_found', 'Idea not found');
@@ -489,7 +491,7 @@ export function createEngine(deps: Deps) {
     const c = mustIdea(bId);
     if (a.boardId !== board.id || c.boardId !== board.id) throw new AppError(400, 'bad_pair', 'Ideas belong to another board');
     const { idea } = await call(board.id, 'combine', (llm) =>
-      llm.combine({ model: modelFor(board, 'combine'), flow: board.config.flow, board, a, b: c, existingTitles: titles(board.id) }),
+      llm.combine({ model: modelFor(board, 'combine'), flow: board.config.flow, board: withHousehold(board), a, b: c, existingTitles: titles(board.id) }),
     );
     const liveA = repo.getIdea(a.id);
     const liveC = repo.getIdea(c.id);
@@ -519,7 +521,7 @@ export function createEngine(deps: Deps) {
     const { ideas } = await call(board.id, 'deep', (llm) =>
       llm.deepCross({
         model: modelFor(board, 'deep'),
-        board,
+        board: withHousehold(board),
         candidates,
         existingTitles: titles(board.id),
       }),
@@ -589,13 +591,13 @@ export function createEngine(deps: Deps) {
         }
         if (page.text.length < 80) throw new AppError(422, 'url_no_text', `${url}: too little readable text`);
         const { idea } = await call(board.id, 'distill', (llm) =>
-          llm.distill({ model: modelFor(board, 'distill'), flow, board, text: [page.title, page.text].filter(Boolean).join('\n\n'), url }),
+          llm.distill({ model: modelFor(board, 'distill'), flow, board: withHousehold(board), text: [page.title, page.text].filter(Boolean).join('\n\n'), url }),
         );
         ({ title, pitch } = idea);
         sourceUrl = url;
       } else if (text.length > 160) {
         const { idea } = await call(board.id, 'distill', (llm) =>
-          llm.distill({ model: modelFor(board, 'distill'), flow, board, text }));
+          llm.distill({ model: modelFor(board, 'distill'), flow, board: withHousehold(board), text }));
         ({ title, pitch } = idea);
       }
       const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
