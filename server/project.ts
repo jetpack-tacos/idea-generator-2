@@ -3,12 +3,13 @@
 // notes (gitignored) and an empty git repo. Never overwrites: a taken name
 // gets -2, -3 and so on.
 
-import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import { runNoShell } from './alert.ts';
 import type { ChatFn } from './llm.ts';
 import { localDay } from './db.ts';
+import { isLocalAbsolute } from './settings.ts';
 import { medal, scoreSum } from '../public/js/score.js';
 
 export type Brief = {
@@ -78,7 +79,9 @@ export function slugify(s: string) {
 
 export function expandHome(p: string) {
   const t = p.trim();
-  return t === '~' || t.startsWith('~/') ? join(homedir(), t.slice(1)) : t;
+  if (t === '~') return homedir();
+  if (t.startsWith('~/') || t.startsWith('~\\')) return join(homedir(), t.slice(2));
+  return t;
 }
 
 export async function writeBrief(a: {
@@ -200,8 +203,9 @@ export async function writeProject(a: {
   exists?: { verdict: string; url?: string | null; reason?: string | null } | null;
   gitInit?: boolean;
 }) {
-  const root = resolve(expandHome(a.root));
-  if (!isAbsolute(expandHome(a.root))) throw new Error(`The projects folder must be an absolute path or start with ~ (got "${a.root}")`);
+  const expanded = expandHome(a.root);
+  if (!isLocalAbsolute(expanded)) throw new Error(`The projects folder must be an absolute path or start with ~ (got "${a.root}")`);
+  const root = resolve(expanded);
   const slug = slugify(a.brief.slug);
   const dir = await uniqueDir(root, /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(slug) ? `idea-${slug}` : slug);
   const t = LABELS;
@@ -243,7 +247,7 @@ export async function writeProject(a: {
     [`# ${a.brief.name}`, '', t.vaultIntro, '', `## ${t.idea}`, '', fmt(a.idea), '', `## ${t.questions}`, '', ...a.brief.openQuestions.map((q) => `- [ ] ${q}`), ''].join('\n'),
   );
   if (a.gitInit !== false) {
-    await new Promise<void>((done) => execFile('git', ['init', '-q', '-b', 'main'], { cwd: dir }, () => done()));
+    await runNoShell('git', ['init', '-q', '-b', 'main'], 30_000, { cwd: dir });
   }
   return dir;
 }

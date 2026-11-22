@@ -1,9 +1,15 @@
-import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { isAbsolute } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 import { DEFAULT_APP_SETTINGS, ROLES, parseModel, type AppSettings } from './providers.ts';
 
 const TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+
+export function isLocalAbsolute(p: string): boolean {
+  if (!p) return false;
+  if (process.platform === 'win32') return /^[A-Za-z]:[\\/]/.test(p);
+  return isAbsolute(p);
+}
 
 export function mergeAppSettings(raw: any, base = DEFAULT_APP_SETTINGS): AppSettings {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Settings must be an object');
@@ -18,7 +24,9 @@ export function mergeAppSettings(raw: any, base = DEFAULT_APP_SETTINGS): AppSett
   }
   if (raw.projectsRoot !== undefined) {
     const root = typeof raw.projectsRoot === 'string' ? raw.projectsRoot.trim() : '';
-    if (!isAbsolute(root) && !root.startsWith('~/')) throw new Error('Projects root must be absolute or start with ~/');
+    if (!isLocalAbsolute(root) && root !== '~' && !root.startsWith('~/') && !root.startsWith('~\\')) {
+      throw new Error('Projects root must be absolute or start with ~/');
+    }
     out.projectsRoot = root;
   }
   if (raw.maxUsdPerDay !== undefined) {
@@ -47,7 +55,7 @@ export function mergeAppSettings(raw: any, base = DEFAULT_APP_SETTINGS): AppSett
   }
   for (const key of ['judgeManyPath', 'crewPath', 'sessionsPath'] as const) {
     if (raw[key] !== undefined) {
-      if (typeof raw[key] !== 'string' || (raw[key].trim() && !isAbsolute(raw[key].trim()))) {
+      if (typeof raw[key] !== 'string' || (raw[key].trim() && !isLocalAbsolute(raw[key].trim()))) {
         throw new Error(`${key} must be empty or an absolute path`);
       }
       out[key] = raw[key].trim();
@@ -96,10 +104,22 @@ export function openSettings(file: string) {
     get: () => settings,
     set(next: AppSettings) {
       const validated = mergeAppSettings(next);
+      mkdirSync(dirname(file), { recursive: true });
       const temp = `${file}.${randomUUID()}.tmp`;
       try {
         writeFileSync(temp, JSON.stringify(validated, null, 2) + '\n', { flag: 'wx' });
-        renameSync(temp, file);
+        for (let attempt = 0; ; attempt++) {
+          try {
+            renameSync(temp, file);
+            break;
+          } catch (err: any) {
+            if ((err?.code === 'EPERM' || err?.code === 'EBUSY') && attempt < 4) {
+              Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (attempt + 1));
+              continue;
+            }
+            throw err;
+          }
+        }
         settings = validated;
       } finally {
         rmSync(temp, { force: true });

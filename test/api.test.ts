@@ -2,10 +2,10 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request, type Server } from 'node:http';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb } from '../server/db.ts';
+import { DEFAULT_TEMPLATES, openDb } from '../server/db.ts';
 import { createEngine } from '../server/engine.ts';
 import { createAutopilot } from '../server/autopilot.ts';
 import { createHandler } from '../server/app.ts';
@@ -453,4 +453,32 @@ test('loopback Host, same-origin writes, JSON media type and English page', asyn
   assert.equal(repo.listBoards().length, boards);
   assert.equal((await write(base, 'application/json; charset=utf-8')).status, 200);
   assert.equal(repo.listBoards().length, boards + 1);
+});
+
+test('HTTP edge cases: HEAD static files, non-object JSON rejected with 400, reveal checks directory, example/prompt hygiene', async () => {
+  const head = await fetch(base + '/js/score.js', { method: 'HEAD' });
+  assert.equal(head.status, 200);
+
+  for (const invalidBody of ['null', '[]', '"text"', '42']) {
+    const res = await fetch(base + '/api/boards', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: invalidBody,
+    });
+    assert.equal(res.status, 400, `body ${invalidBody} must return 400, not 500`);
+  }
+
+  // reveal must reject a projectPath pointing to a file rather than a directory
+  const board = await newBoard({ title: 'RevealCheck' });
+  const idea = await seed(board.id, 'FilePathCheck');
+  await engine.idle();
+  const fakeFile = join(projectsRoot, 'not-a-dir.bat');
+  writeFileSync(fakeFile, '@echo off', 'utf8');
+  repo.setProjectPath(idea.id, fakeFile);
+  const rev = await api('POST', `/api/ideas/${idea.id}/reveal`, {});
+  assert.equal(rev.status, 404);
+
+  const example = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'settings.example.json'), 'utf8'));
+  assert.equal(example.judgeManyPath, 'C:/path/to/judge_many.py');
+  assert.ok(!DEFAULT_TEMPLATES.some((t) => /economically/i.test(t.expand)));
 });

@@ -133,3 +133,66 @@ test('autoStep with the real engine: judge first, grow a small pool, then breed'
   assert.ok(ideas.every((i) => i.judgedAt), 'every step leaves its ideas judged');
   assert.ok(ideas.some((i) => i.kind === 'combine' && i.generation >= 2));
 });
+
+test('dollar cap is checked before every paid call inside autoStep, rejects $0 paid calls, and updates status spentToday', async () => {
+  const repo = openDb(':memory:');
+  try {
+    let now = T;
+    let maxUsdPerDay = 0;
+    let chatCalls = 0;
+    const chat = async (r: ChatRequest) => {
+      chatCalls++;
+      if (r.schemaName === 'expand') {
+        return { value: { ideas: [1, 2, 3].map((k) => ({ title: `E${k}`, pitch: 'p' })) }, costUsd: 0.015 };
+      }
+      return { value: { reason: 'ok', originality: 3, feasibility: 3, impact: 3, keywords: ['k'] }, costUsd: 0.015 };
+    };
+    const settings = () => ({ ...DEFAULT_APP_SETTINGS, maxUsdPerDay });
+    const engine = createEngine({ repo, chat, settings, now: () => now, gitInit: false });
+    const board = repo.createBoard({ title: 'CapBoard', config: { mode: 'auto', autopilotSeconds: 5, rate: { stepsPerHour: 60, usdPerDay: 0.01 } } });
+    const seed = repo.insertIdea({ boardId: board.id, title: 'S', pitch: 'p', kind: 'seed', x: 0, y: 0, generation: 0 });
+    repo.saveJudgement(seed.id, { originality: 4, feasibility: 4, impact: 3, reason: 'ok' });
+
+    const ap = createAutopilot({ repo, engine, settings, now: () => now });
+    assert.equal(ap.status(board.id).state, 'idle', 'fresh auto board starts idle, not manual');
+
+    // 1) maxUsdPerDay = 0 blocks paid models before any chat call
+    await ap.tick();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(chatCalls, 0);
+    assert.equal(ap.status(board.id).state, 'global_budget');
+
+    // 2) Raise global cap; board cap $0.01 lets expand ($0.015) run once then blocks judge calls inside the SAME autoStep
+    maxUsdPerDay = 5;
+    now += 10_000;
+    await ap.tick();
+    for (let i = 0; i < 100 && ap.status(board.id).state === 'running'; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(chatCalls, 1, 'judge calls inside autoStep are blocked once board budget is exceeded');
+    assert.equal(ap.status(board.id).state, 'board_budget');
+    assert.equal(ap.status(board.id).spentToday, 0.015);
+    await ap.stop();
+
+    // ap.stop() awaits in-flight autoStep before resolving (preventing close-on-active-DB races)
+    let finishedSlow = false;
+    const slowEngine = {
+      bus: createBus(),
+      async autoStep() {
+        await new Promise((r) => setTimeout(r, 40));
+        finishedSlow = true;
+        return { did: 'idle' as const, reason: 'nothing_to_do' };
+      },
+    } as any;
+    // A fresh board with budget left, so the slow step actually starts (CapBoard above is over its cap).
+    const slowRepo = openDb(':memory:');
+    slowRepo.createBoard({ title: 'Slow', config: { mode: 'auto' } });
+    const apSlow = createAutopilot({ repo: slowRepo, engine: slowEngine, settings: () => ({ ...DEFAULT_APP_SETTINGS, maxUsdPerDay: 5 }), now: () => T });
+    await apSlow.tick();
+    await apSlow.stop();
+    assert.equal(finishedSlow, true);
+    slowRepo.close();
+  } finally {
+    repo.close();
+  }
+});

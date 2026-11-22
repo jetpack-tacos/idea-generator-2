@@ -6,8 +6,12 @@ export const SPEND_FILE = join(import.meta.dirname, '..', 'logs', 'spend.jsonl')
 
 export function spendLogger(file = SPEND_FILE) {
   return (attempt: ChatAttempt) => {
-    mkdirSync(dirname(file), { recursive: true });
-    appendFileSync(file, JSON.stringify({ time: new Date().toISOString(), ...attempt }) + '\n');
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      appendFileSync(file, JSON.stringify({ time: new Date().toISOString(), ...attempt }) + '\n');
+    } catch (error: any) {
+      console.error('[spend]', error?.message ?? error);
+    }
   };
 }
 
@@ -21,15 +25,21 @@ export function todaySpend(file = SPEND_FILE, now = new Date()) {
   }
   const day = now.toDateString();
   const totals = new Map<string, { model: string; calls: number; inputTokens: number; outputTokens: number; costUsd: number }>();
-  for (const line of contents.trimEnd().split('\n')) {
-    if (!line) continue;
-    const row: ChatAttempt & { time: string } = JSON.parse(line);
+  for (const line of contents.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let row: ChatAttempt & { time: string };
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!row || typeof row.model !== 'string' || typeof row.time !== 'string') continue;
     if (new Date(row.time).toDateString() !== day) continue;
     const total = totals.get(row.model) ?? { model: row.model, calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 };
     total.calls++;
-    total.inputTokens += row.inputTokens;
-    total.outputTokens += row.outputTokens;
-    total.costUsd += row.costUsd;
+    total.inputTokens += Number(row.inputTokens) || 0;
+    total.outputTokens += Number(row.outputTokens) || 0;
+    total.costUsd += Number(row.costUsd) || 0;
     totals.set(row.model, total);
   }
   return [...totals.values()].sort((a, b) => a.model.localeCompare(b.model));

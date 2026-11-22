@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -6,7 +6,8 @@ export const ALERTS_LOG_FILE = join(import.meta.dirname, '..', 'logs', 'alerts.l
 
 export function sanitizeAlertTitle(title: string): string {
   return String(title ?? '')
-    .replace(/[\r\n]+/g, ' ')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[\x00-\x1f\x7f]/g, '')
     .replace(/"/g, '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -17,32 +18,68 @@ export function runNoShell(
   command: string,
   args: string[],
   timeoutMs: number,
+  opts: { cwd?: string } = {},
 ): Promise<{ code: number | null; killed: boolean; stdout: string; stderr: string; error?: Error }> {
   return new Promise((resolve) => {
     let settled = false;
     let killed = false;
+    let childClosed = false;
+    let treeKilled = true;
     let stdout = '';
     let stderr = '';
     const cap = 1_048_576;
-    let child;
+    let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      child = spawn(command, args, { cwd: opts.cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     } catch (error: any) {
       resolve({ code: null, killed: false, stdout: '', stderr: '', error });
       return;
     }
+    let killFallback: ReturnType<typeof setTimeout> | undefined;
+    let streamDrainTimer: ReturnType<typeof setTimeout> | undefined;
+    let lastCode: number | null = null;
+    let lastError: Error | undefined;
+
     const finish = (result: { code: number | null; killed: boolean; stdout: string; stderr: string; error?: Error }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (killFallback) clearTimeout(killFallback);
+      if (streamDrainTimer) clearTimeout(streamDrainTimer);
       resolve(result);
     };
+
+    const maybeFinish = () => {
+      if (settled) return;
+      if (killed) {
+        if (childClosed && treeKilled) finish({ code: null, killed: true, stdout, stderr });
+      } else if (childClosed) {
+        finish({ code: lastCode, killed: false, stdout, stderr, ...(lastError ? { error: lastError } : {}) });
+      }
+    };
+
     const timer = setTimeout(() => {
       killed = true;
-      try { child.kill(); } catch { /* ignore */ }
-      try { child.stdout?.destroy(); } catch { /* ignore */ }
-      try { child.stderr?.destroy(); } catch { /* ignore */ }
-      finish({ code: null, killed: true, stdout, stderr });
+      killFallback = setTimeout(() => {
+        try { child.stdout?.destroy(); } catch { /* ignore */ }
+        try { child.stderr?.destroy(); } catch { /* ignore */ }
+        finish({ code: null, killed: true, stdout, stderr });
+      }, 5_000);
+      killFallback.unref?.();
+
+      if (process.platform === 'win32' && child.pid) {
+        treeKilled = false;
+        execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, (err) => {
+          if (err) {
+            try { child.kill(); } catch { /* ignore */ }
+          }
+          treeKilled = true;
+          maybeFinish();
+        });
+      } else {
+        try { child.kill('SIGKILL'); } catch { /* ignore */ }
+        maybeFinish();
+      }
     }, timeoutMs);
     timer.unref?.();
 
@@ -53,10 +90,27 @@ export function runNoShell(
       if (stderr.length < cap) stderr += chunk.toString('utf8');
     });
     child.on('error', (error) => {
-      finish({ code: null, killed, stdout, stderr, error });
+      lastError = error;
+      if (!killed) {
+        finish({ code: null, killed: false, stdout, stderr, error });
+      } else {
+        childClosed = true;
+        maybeFinish();
+      }
+    });
+    child.on('exit', () => {
+      if (killed) {
+        streamDrainTimer = setTimeout(() => {
+          try { child.stdout?.destroy(); } catch { /* ignore */ }
+          try { child.stderr?.destroy(); } catch { /* ignore */ }
+        }, 300);
+        streamDrainTimer.unref?.();
+      }
     });
     child.on('close', (code) => {
-      finish({ code, killed, stdout, stderr });
+      lastCode = code;
+      childClosed = true;
+      maybeFinish();
     });
   });
 }
@@ -70,7 +124,8 @@ export async function sendAlert(
   if (!command.length || !title) return { ok: true, skipped: true, title };
   const logFile = opts.logFile ?? ALERTS_LOG_FILE;
   const timeoutMs = opts.timeoutMs ?? 120_000;
-  const [bin, ...rest] = command.map((part) => part.replaceAll('{title}', title));
+  const [bin, ...rawArgs] = command;
+  const rest = rawArgs.map((part) => part.replaceAll('{title}', title));
   const res = await runNoShell(bin, rest, timeoutMs);
   const logLine = (status: string, detail = '') => {
     try {

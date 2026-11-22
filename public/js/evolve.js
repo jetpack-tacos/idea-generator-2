@@ -77,7 +77,7 @@ function lineageSources(ideas, edges) {
 
 function crossesSources(a, b) {
   if (!a.size || !b.size) return false;
-  return a.size > 1 || b.size > 1 || a.values().next().value !== b.values().next().value;
+  return [...b].some((s) => !a.has(s));
 }
 
 /**

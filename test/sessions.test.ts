@@ -20,8 +20,11 @@ test('sessions scout reads recent user jsonl, calls judge_many WITHOUT --public,
     const longWish = longPrefix + 'I really wish there was a lightweight local tool to automatically archive my scanned receipts without cloud sync.' + ' ' + 'B'.repeat(220);
 
     const recentFile = join(sessionsDir, 'today.jsonl');
+    const hugeAssistantLine = JSON.stringify({ role: 'user', content: 'I wish ' + 'Z'.repeat(600 * 1024) });
     writeFileSync(recentFile, [
       JSON.stringify({ role: 'user', content: longWish }),
+      JSON.stringify({ type: 'user', message: { role: 'assistant', content: 'I wish assistant text must be ignored even if type is user.' } }),
+      hugeAssistantLine,
       JSON.stringify({ role: 'user', content: [{ type: 'text', text: 'My friend Alice at 123 Main St needs help paying her bank account bill.' }, { type: 'tool_result', text: 'ignored' }] }),
       JSON.stringify({ role: 'assistant', content: 'I wish I could help build a tool for that!' }),
       JSON.stringify({ role: 'user', content: 'Please fix the typo on line 42.' }),
@@ -92,6 +95,7 @@ with open(out_path, 'w', encoding='utf-8') as out:
     await scheduler.stop();
     assert.equal(llmCalled, false);
     assert.equal(repo.latestFinds().length, 0);
+    assert.ok(repo.listScoutRuns().find((r) => r.source === 'sessions')?.lastError, 'judge_many failure surfaces in scout_runs');
 
     // And when judge_many succeeds via scheduler, finds are stored with score and never sent to LLM
     let t = now + 20 * 3_600_000;
@@ -114,10 +118,34 @@ with open(out_path, 'w', encoding='utf-8') as out:
     await schedulerOk.tick();
     await schedulerOk.stop();
     assert.equal(llmCalled, false);
+    assert.equal(repo.listScoutRuns().find((r) => r.source === 'sessions')?.lastError, null, 'cleared once judge_many succeeds');
     const stored = repo.latestFinds();
     assert.equal(stored.length, 1);
     assert.equal(stored[0].source, 'sessions');
     assert.equal(stored[0].score, 0.88);
+
+    // Second round 13h later must NOT re-send already-seen messages to judge_many
+    const schedulerDedupe = createScoutScheduler({
+      repo,
+      engine: engineOk,
+      settings: () => ({ ...DEFAULT_APP_SETTINGS, sessionsPath: sessionsDir, judgeManyPath: judgeScript }),
+      sources: {},
+      sessionsScout: undefined,
+      now: () => t,
+    });
+    // Replace judgeScript with one that records invocation count
+    writeFileSync(judgeScript, `
+import sys
+with open(${JSON.stringify(seenArgsFile + '.count')}, 'a', encoding='utf-8') as cf:
+    cf.write('1\\n')
+sys.exit(0)
+`, 'utf8');
+    schedulerDedupe.start();
+    t += 13 * 3_600_000;
+    await schedulerDedupe.tick();
+    await schedulerDedupe.stop();
+    const { existsSync: exists } = await import('node:fs');
+    assert.equal(exists(seenArgsFile + '.count'), false, 'already-seen session messages are not re-sent to judge_many');
   } finally {
     repo.close();
     rmSync(dir, { recursive: true, force: true });

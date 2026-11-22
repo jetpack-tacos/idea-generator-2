@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runNoShell } from '../server/alert.ts';
 import { localDay } from '../server/db.ts';
 import { fetchPapers, normalizeUrl } from '../server/leads.ts';
 import { expandHome, renderClaudeMd, slugify, writeProject, type Brief } from '../server/project.ts';
@@ -37,6 +38,7 @@ test('slugs are ASCII; ~ expands to home', () => {
   assert.equal(slugify('Sjungande Bänk på Öland!'), 'sjungande-bank-pa-oland');
   assert.equal(slugify('!!!'), 'idea');
   assert.equal(expandHome('~/x'), join(homedir(), 'x'));
+  assert.equal(expandHome('~\\x'), join(homedir(), 'x'));
   assert.equal(expandHome('/abs'), '/abs');
 });
 
@@ -81,4 +83,8 @@ test('gold project files, literal Windows-safe paths and no overwrites', async (
   assert.equal(ordinary.slice(root.length + 1), 'idea-con');
   assert.ok(!readdirSync(ordinary).includes('JER-ASKED.md'));
   await assert.rejects(writeProject({ ...input, root: 'relative' }), /absolute/);
+
+  const cwdRes = await runNoShell('python', ['-I', '-c', 'import os; print(os.getcwd())'], 5000, { cwd: ordinary });
+  assert.equal(cwdRes.code, 0);
+  assert.equal(cwdRes.stdout.trim(), ordinary);
 });

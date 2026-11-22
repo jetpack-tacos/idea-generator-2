@@ -117,7 +117,7 @@ export async function researchLeads(a: { chat: ChatFn; model: string; goal: stri
   ].join('\n\n');
   const r = await a.chat({
     model: a.model,
-    system: 'You are a research scout who reads AI papers and explains to designers and founders what each one makes possible.',
+    system: 'You are a research scout who reads AI papers and explains to makers and households what each one makes possible.',
     user,
     schemaName: 'research',
     schema: RESEARCH_SCHEMA,

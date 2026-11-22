@@ -47,6 +47,32 @@ test('equal-fitness descendants prefer different seed sources; stronger and sing
   assert.equal(choose()?.b?.id, 5);
 });
 
+test('crossesSources works for generation-1+ multi-source ideas (prefers genuinely new source)', () => {
+  const seed = (id: number, seedSource: string) => idea(id, null, { kind: 'seed', generation: 0, seedSource });
+  const ideas = [
+    seed(1, 'papers'),
+    seed(2, 'lobsters'),
+    seed(3, 'hackernews'),
+    // Parent 4 is a gen-1 combine of {papers, lobsters}
+    idea(4, 14, { kind: 'combine', generation: 1 }),
+    // Candidate 5 is from {papers} (already in parent 4)
+    idea(5, 12, { kind: 'expand', generation: 1 }),
+    // Candidate 6 is from {hackernews} (new source not in parent 4)
+    idea(6, 12, { kind: 'expand', generation: 1 }),
+  ];
+  const edges = [
+    { from: 1, to: 4 }, { from: 2, to: 4 },
+    { from: 1, to: 5 },
+    { from: 3, to: 6 },
+  ];
+  // Parent 4 wins first tournament (k=3, pool=[4,5,6]); second tournament compares 5 vs 6 (same fitness 12)
+  const draws = [0.5, 0, 0, 0, 0, 0.6, 0];
+  const m = nextMove(ideas, edges, { rng: () => draws.shift()!, mutationRate: 0 });
+  assert.equal(m?.type, 'combine');
+  assert.equal(m.a.id, 4);
+  assert.equal(m.b.id, 6, 'candidate from new source hackernews beats candidate from already-included papers');
+});
+
 test('a hand-set medal beats the judge, for display and for breeding', () => {
   const i = idea(1, 6, { medalOverride: 3 });
   assert.equal(medal(i), 3);

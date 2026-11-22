@@ -62,8 +62,12 @@ export async function judgeMany(path: string, context: string, finds: StoredFind
     const latest = new Map<string, any>();
     for (const line of (await readFile(output, 'utf8')).split(/\r?\n/)) {
       if (!line.trim()) continue;
-      const row = JSON.parse(line);
-      latest.set(String(row.id), row);
+      try {
+        const row = JSON.parse(line);
+        if (row && row.id != null) latest.set(String(row.id), row);
+      } catch {
+        /* skip malformed line */
+      }
     }
     const scores = new Map<number, number>();
     for (const { id } of finds) {
@@ -73,7 +77,11 @@ export async function judgeMany(path: string, context: string, finds: StoredFind
     }
     return scores;
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    try {
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch {
+      /* ignore temp cleanup errors */
+    }
   }
 }
 
@@ -103,8 +111,12 @@ export async function judgeManySessions(
     const latest = new Map<string, any>();
     for (const line of (await readFile(output, 'utf8')).split(/\r?\n/)) {
       if (!line.trim()) continue;
-      const row = JSON.parse(line);
-      latest.set(String(row.id), row);
+      try {
+        const row = JSON.parse(line);
+        if (row && row.id != null) latest.set(String(row.id), row);
+      } catch {
+        /* skip malformed line */
+      }
     }
     const results = new Map<string, SessionJudgement>();
     for (const { id } of sessionItems) {
@@ -117,7 +129,11 @@ export async function judgeManySessions(
     }
     return results;
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    try {
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch {
+      /* ignore temp cleanup errors */
+    }
   }
 }
 
@@ -128,7 +144,7 @@ const SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        properties: { id: { type: 'string' }, fit: { type: 'number', minimum: 0, maximum: 1 } },
+        properties: { id: { type: 'string' }, fit: { type: 'number', description: 'Fit score from 0 to 1.' } },
         required: ['id', 'fit'],
         additionalProperties: false,
       },

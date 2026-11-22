@@ -153,6 +153,9 @@ function onEvent(e) {
       toast(t('projectCreated', { p: e.path }), 'good', 9000);
       loadStatus();
       break;
+    case 'crew_paused':
+      loadStatus();
+      break;
     case 'spinoff':
       S.spinoffs.push({ ideaId: e.ideaId, boardId: e.boardId, title: e.title });
       renderPanelSoon();

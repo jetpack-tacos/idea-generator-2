@@ -42,11 +42,16 @@ async function readJson(req: IncomingMessage): Promise<any> {
     chunks.push(c);
   }
   if (!size) return {};
+  let parsed: unknown;
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } catch {
     throw new AppError(400, 'bad_json', 'Invalid JSON');
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new AppError(400, 'bad_json', 'JSON body must be an object');
+  }
+  return parsed;
 }
 
 function send(res: ServerResponse, status: number, body: unknown, type = 'application/json; charset=utf-8') {
@@ -321,10 +326,25 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir, now
   function events(boardId: number, res: ServerResponse) {
     if (!repo.getBoard(boardId)) return send(res, 404, { error: 'Board not found' });
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-    const write = (e: unknown) => res.write(`data: ${JSON.stringify(e)}\n\n`);
+    const write = (e: unknown) => {
+      if (res.writableEnded || res.destroyed) return;
+      try {
+        res.write(`data: ${JSON.stringify(e)}\n\n`);
+      } catch {
+        /* ignore closed stream */
+      }
+    };
     write({ type: 'hello', autopilot: autopilot.status(boardId) });
     const off = engine.bus.on(boardId, write);
-    const ping = setInterval(() => res.write(': ping\n\n'), 25_000);
+    const ping = setInterval(() => {
+      if (res.writableEnded || res.destroyed) return;
+      try {
+        res.write(': ping\n\n');
+      } catch {
+        clearInterval(ping);
+      }
+    }, 25_000);
+    ping.unref?.();
     res.on('close', () => {
       off();
       clearInterval(ping);
@@ -349,7 +369,7 @@ export function createHandler({ repo, engine, autopilot, runtime, publicDir, now
     if (host !== `localhost:${port}` && host !== `127.0.0.1:${port}`) {
       return send(res, 403, { error: 'Forbidden host' });
     }
-    if (req.method !== 'GET') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
       const origin = req.headers.origin;
       const mediaType = req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase();
       if ((origin !== undefined && origin !== `http://${host}`) || mediaType !== 'application/json') {

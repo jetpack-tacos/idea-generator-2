@@ -197,3 +197,155 @@ sys.exit(3)
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('gold brief failure surfaces crew_signin with backoff and 3-attempt limit; crew_cap pauses without 10s retry loop', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ideagen-gold-crew-'));
+  const repo = openDb(':memory:');
+  try {
+    const crewScript = join(dir, 'crew_signin.py');
+    writeFileSync(crewScript, `
+import sys
+sys.stderr.write('Sign-in expired for brief')
+sys.exit(3)
+`, 'utf8');
+
+    let now = Date.parse('2026-11-10T10:00:00');
+    let crewCallsLimit = 10;
+    const settings = () => ({
+      ...DEFAULT_APP_SETTINGS,
+      projectsRoot: join(dir, 'projects'),
+      crewPath: crewScript,
+      crewCallsPerDay: crewCallsLimit,
+      models: {
+        ...DEFAULT_APP_SETTINGS.models,
+        judge: 'deepseek:deepseek-flash',
+        expand: 'deepseek:deepseek-flash',
+        combine: 'deepseek:deepseek-flash',
+        brief: 'crew:neon:medium',
+      },
+    });
+
+    let expandCalls = 0;
+    const realCrew = makeChat({ settings });
+    const chat = async (r: ChatRequest) => {
+      if (r.model.startsWith('crew:')) return realCrew(r);
+      if (r.schemaName === 'expand') {
+        expandCalls++;
+        return { value: { ideas: [1, 2, 3].map((k) => ({ title: `Exp ${k}`, pitch: 'p' })) }, costUsd: 0 };
+      }
+      return { value: { title: 'C', pitch: 'p' }, costUsd: 0 };
+    };
+    const eng = createEngine({ repo, chat, settings, now: () => now, gitInit: false });
+    const board = repo.createBoard({ title: 'GoldCrew', config: { mode: 'auto', autopilotSeconds: 10 } });
+    const gold = repo.insertIdea({ boardId: board.id, title: 'GoldIdea', pitch: 'p', kind: 'seed', x: 0, y: 0, generation: 0 });
+    repo.saveJudgement(gold.id, { originality: 5, feasibility: 4, impact: 4, reason: 'great' });
+    repo.saveExistsResult(gold.id, { verdict: 'new', url: null, reason: 'none' });
+
+    const ap = createAutopilot({ repo, engine: eng, settings, now: () => now });
+    const waitAp = async () => {
+      for (let i = 0; i < 200 && ap.status(board.id).state === 'running'; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    };
+
+    // Attempt 1: crew_signin surfaces to autopilot status and sets backoff
+    await ap.tick();
+    await waitAp();
+    assert.equal(ap.status(board.id).state, 'error');
+    assert.equal(ap.status(board.id).code, 'crew_signin');
+    assert.equal(repo.getIdea(gold.id)!.briefAttempts, 1);
+
+    // 10s later: must be in backoff, NOT retrying immediately
+    now += 10_000;
+    await ap.tick();
+    assert.equal(ap.status(board.id).state, 'backoff');
+    assert.equal(repo.getIdea(gold.id)!.briefAttempts, 1);
+
+    // After backoff (30s, then 60s), attempts 2 and 3 run and hit max 3 briefAttempts
+    now += 30_000;
+    await ap.tick();
+    await waitAp();
+    assert.equal(repo.getIdea(gold.id)!.briefAttempts, 2);
+
+    now += 65_000;
+    await ap.tick();
+    await waitAp();
+    assert.equal(repo.getIdea(gold.id)!.briefAttempts, 3);
+
+    // After 3 brief failures, board moves on to expand instead of starving forever
+    now += 125_000;
+    await ap.tick();
+    await waitAp();
+    assert.equal(expandCalls, 1, 'board is not permanently starved after 3 brief attempts');
+
+    // Now test crew_cap: judge uses crew, expand uses paid model -> crew_cap stops 10s retry loop AND does not waste expand tokens
+    const b2 = repo.createBoard({
+      title: 'CrewJudge',
+      config: { mode: 'auto', autopilotSeconds: 10, models: { judge: 'crew:neon:medium', expand: 'deepseek:deepseek-flash' } },
+    });
+    const s1 = repo.insertIdea({ boardId: b2.id, title: 'S1', pitch: 'p', kind: 'seed', x: 0, y: 0, generation: 0 });
+    repo.saveJudgement(s1.id, { originality: 4, feasibility: 4, impact: 3, reason: 'ok' });
+    crewCallsLimit = repo.crewCallsOn('2026-11-10'); // cap reached right now
+    let b2ExpandCalls = 0;
+    const chat2 = async (r: ChatRequest) => {
+      if (r.schemaName === 'expand') {
+        b2ExpandCalls++;
+        return { value: { ideas: [1, 2, 3].map((k) => ({ title: `B2Exp ${k}`, pitch: 'p' })) }, costUsd: 0 };
+      }
+      if (r.schemaName === 'judgement') {
+        return { value: { reason: 'ok', originality: 3, feasibility: 3, impact: 3, keywords: ['k'] }, costUsd: 0 };
+      }
+      return { value: { title: 'x', pitch: 'p' }, costUsd: 0 };
+    };
+    const eng2 = createEngine({ repo, chat: chat2, settings, now: () => now, gitInit: false });
+    const ap2 = createAutopilot({ repo, engine: eng2, settings, now: () => now });
+    await ap2.tick();
+    await waitAp();
+    assert.equal(ap2.status(b2.id).state, 'crew_cap');
+    assert.equal(b2ExpandCalls, 0, 'paid expand must not run when judge is crew-capped');
+
+    // 10s and 30s later: stays in crew_cap without re-running autoStep
+    now += 10_000;
+    await ap2.tick();
+    assert.equal(ap2.status(b2.id).state, 'crew_cap');
+    now += 30_000;
+    await ap2.tick();
+    assert.equal(ap2.status(b2.id).state, 'crew_cap');
+    assert.equal(b2ExpandCalls, 0);
+
+    // Next day: resumes automatically
+    now = Date.parse('2026-11-11T10:00:00');
+    await ap2.tick();
+    await waitAp();
+    assert.equal(b2ExpandCalls, 1);
+
+    // combine-is-crew at cap falls back to non-crew expand
+    crewCallsLimit = 0;
+    let b3ExpandCalls = 0;
+    const chat3 = async (r: ChatRequest) => {
+      if (r.schemaName === 'expand') {
+        b3ExpandCalls++;
+        return { value: { ideas: [1, 2, 3].map((k) => ({ title: `B3Exp ${k}`, pitch: 'p' })) }, costUsd: 0 };
+      }
+      if (r.schemaName === 'judgement') {
+        return { value: { reason: 'ok', originality: 3, feasibility: 3, impact: 3, keywords: ['k'] }, costUsd: 0 };
+      }
+      throw new Error(`unexpected ${r.schemaName}`);
+    };
+    const eng3 = createEngine({ repo, chat: chat3, settings, now: () => now, gitInit: false });
+    const b3 = repo.createBoard({
+      title: 'CombineCrew',
+      config: { mode: 'auto', models: { combine: 'crew:neon:medium', expand: 'deepseek:deepseek-flash', judge: 'deepseek:deepseek-flash' } },
+    });
+    for (let k = 1; k <= 4; k++) {
+      const x = repo.insertIdea({ boardId: b3.id, title: `I${k}`, pitch: 'p', kind: 'seed', x: k * 10, y: 0, generation: 0 });
+      repo.saveJudgement(x.id, { originality: 3, feasibility: 3, impact: 3, reason: 'ok' });
+    }
+    const step3 = await eng3.autoStep(b3.id);
+    assert.equal(step3.did, 'expand');
+    assert.equal(b3ExpandCalls, 1);
+  } finally {
+    repo.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

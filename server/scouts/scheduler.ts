@@ -52,6 +52,8 @@ export function createScoutScheduler(deps: {
               sessionsPath: settings.sessionsPath,
               judgeManyPath: settings.judgeManyPath,
               now: now(),
+              seen: (id) => repo.hasSeenSession(id),
+              markSeen: (ids) => repo.markSeenSessions(ids, now()),
               log,
             });
         repo.clearScoutError('sessions');
@@ -76,7 +78,7 @@ export function createScoutScheduler(deps: {
     const boards = repo.listBoards();
     const board = boards.find((b) => b.config.mode === 'auto') ?? boards[0];
     const context = [board?.goal ? `Board goal: ${board.goal}` : '', settings.interests].filter(Boolean).join('\n\n');
-    if (finds.length && settings.judgeManyPath) {
+    if (finds.length && settings.judgeManyPath && activeHoursUntil(now(), deps.settings().activeHours) === null) {
       log(`[scouts] judge_many filter for ${finds.length} new finds`);
       try {
         repo.saveFindScores(await judgeMany(settings.judgeManyPath, context, finds));
@@ -85,10 +87,17 @@ export function createScoutScheduler(deps: {
       }
     }
     const unscored = finds.filter((find) => find.source !== 'sessions' && repo.getFind(find.id)?.score === null);
-    if (unscored.length) log(`[scouts] research model filter for ${unscored.length} new finds`);
+    if (unscored.length && activeHoursUntil(now(), deps.settings().activeHours) === null) {
+      log(`[scouts] research model filter for ${unscored.length} new finds`);
+    }
     for (let i = 0; i < unscored.length; i += 10) {
+      const currentSettings = deps.settings();
+      if (activeHoursUntil(now(), currentSettings.activeHours) !== null) {
+        log('[scouts] research model filter paused outside active hours');
+        break;
+      }
       const day = localDay(new Date(now()));
-      const { maxUsdPerDay } = deps.settings();
+      const { maxUsdPerDay } = currentSettings;
       if (repo.spentOn(null, day) >= maxUsdPerDay || (board && repo.spentOn(board.id, day) >= board.config.rate.usdPerDay)) {
         log('[scouts] research model filter skipped remaining finds at the daily budget');
         break;
@@ -116,11 +125,13 @@ export function createScoutScheduler(deps: {
     if (time < readyAt) return Promise.resolve();
     if (time >= nextCleanup) {
       const removed = repo.pruneFinds(time - 90 * DAY);
+      repo.pruneSeenSessions(time - 4 * DAY);
       nextCleanup = time + DAY;
       if (removed) engine.publishFinds();
     }
     const settings = deps.settings();
     if (activeHoursUntil(time, settings.activeHours) !== null) return Promise.resolve();
+    void engine.flushAlerts?.();
     const due = sources.filter(([source]) => !busy.has(source) &&
       repo.claimScout(source, time, settings.scoutIntervalsHours[source] * HOUR));
     const sessionsEnabled = Boolean(deps.sessionsScout || (settings.sessionsPath && settings.judgeManyPath));
@@ -142,6 +153,9 @@ export function createScoutScheduler(deps: {
 
   return {
     tick,
+    async waitIdle() {
+      while (pending.size) await Promise.all([...pending]);
+    },
     start() {
       if (timer) return;
       readyAt = now() + 120_000;

@@ -57,7 +57,7 @@ export function startServer({
     scoutScheduler.start();
   });
   server.once('close', () => {
-    autopilot.stop();
+    void autopilot.stop();
     void scoutScheduler.stop();
   });
   return { server: server.listen(port, '127.0.0.1'), repo, engine, autopilot, scoutScheduler, runtime };
@@ -65,7 +65,19 @@ export function startServer({
 
 if (import.meta.main) {
   teeConsoleToFile(join(root, 'logs', 'server.log'));
-  const { server } = startServer();
+  const { server, repo, engine, autopilot, scoutScheduler } = startServer();
+  let closing = false;
+  const shutdown = async () => {
+    if (closing) return;
+    closing = true;
+    await Promise.allSettled([autopilot.stop(), scoutScheduler.stop(), engine.idle()]);
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    try { repo.close(); } catch { /* ignore */ }
+    process.exit(0);
+  };
+  process.once('SIGINT', () => void shutdown());
+  process.once('SIGTERM', () => void shutdown());
   server.on('listening', () => {
     const address = server.address();
     if (address && typeof address !== 'string') console.log(`Idea Generator: http://localhost:${address.port}`);

@@ -11,6 +11,8 @@ import { startServer } from '../server/index.ts';
 import type { Find } from '../server/scouts/http.ts';
 
 const tempDir = mkdtempSync(join(tmpdir(), 'ideagen-dry-'));
+process.env.DEEPSEEK_API_KEY = 'dry-run';
+process.env.ZAI_API_KEY = 'dry-run';
 const t0 = Date.now();
 const timeline: string[] = [];
 let simNow = (() => {
@@ -277,6 +279,7 @@ try {
   // 08:03 — Scout round + scoring + seeding
   simNow += 3 * 60_000;
   await scoutScheduler.tick();
+  await scoutScheduler.waitIdle();
   const finds = repo.latestFinds();
   const sourcesFound = new Set(finds.map((f) => f.source));
   const scoredCount = finds.filter((f) => f.score !== null).length;

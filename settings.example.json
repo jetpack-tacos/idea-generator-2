@@ -26,7 +26,7 @@
     "google-news": 6,
     "sessions": 12
   },
-  "judgeManyPath": "",
+  "judgeManyPath": "C:/path/to/judge_many.py",
   "crewPath": "C:/path/to/crew.py",
   "crewCallsPerDay": 10,
   "alertCommand": [

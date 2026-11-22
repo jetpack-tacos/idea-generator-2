@@ -9,7 +9,7 @@
 
 import { localDay, type Board, type Idea, type Repo } from './db.ts';
 import type { Engine } from './engine.ts';
-import { isCrewModel, type AppSettings } from './providers.ts';
+import { isCrewModel, ROLES, type AppSettings } from './providers.ts';
 import { isJudged } from '../public/js/score.js';
 
 export type RateInput = {
@@ -95,13 +95,25 @@ export type AutopilotStatus = {
   crewPaused?: boolean;
 };
 
-type BoardState = { busy: boolean; steps: number[]; lastAt: number; errors: number; lastErrorAt: number; status: AutopilotStatus; sent: string };
+type BoardState = {
+  busy: boolean;
+  steps: number[];
+  lastAt: number;
+  errors: number;
+  lastErrorAt: number;
+  crewPausedDay?: string;
+  crewPausedMsg?: string;
+  status: AutopilotStatus;
+  sent: string;
+};
 
 export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: () => AppSettings; now?: () => number; tickMs?: number }) {
   const { repo, engine } = deps;
   const now = deps.now ?? Date.now;
   const states = new Map<number, BoardState>();
   const deepPausedDay = new Map<number, string>();
+  const pending = new Set<Promise<void>>();
+  let stopped = false;
 
   function publish(boardId: number, s: BoardState, status: AutopilotStatus) {
     s.status = status;
@@ -112,15 +124,17 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
   }
 
   async function tick() {
+    if (stopped) return;
     const t = now();
     const day = localDay(new Date(t));
     const settings = deps.settings();
     const { activeHours, maxUsdPerDay, crewCallsPerDay } = settings;
-    const globalSpent = repo.spentOn(null, day);
-    const crewCallsToday = typeof repo.crewCallsOn === 'function' ? repo.crewCallsOn(day) : 0;
-    const crewAtCap = crewCallsToday >= crewCallsPerDay;
+    if (activeHoursUntil(t, activeHours) === null) {
+      await engine.flushAlerts?.();
+    }
 
     for (const b of repo.listBoards()) {
+      if (stopped) return;
       if (b.config.mode !== 'auto') {
         if (states.delete(b.id)) engine.bus.emit(b.id, { type: 'autopilot', status: { state: 'manual' } });
         continue;
@@ -132,10 +146,33 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
       }
       if (s.busy) continue;
       s.steps = s.steps.filter((x) => x > t - HOUR);
+      const globalSpent = repo.spentOn(null, day);
       const boardSpent = repo.spentOn(b.id, day);
+      const crewCallsToday = typeof repo.crewCallsOn === 'function' ? repo.crewCallsOn(day) : 0;
+      const crewAtCap = crewCallsToday >= crewCallsPerDay;
+      if (!crewAtCap) {
+        s.crewPausedDay = undefined;
+        s.crewPausedMsg = undefined;
+        deepPausedDay.delete(b.id);
+      }
       const deepModel = b.config.models.deep || settings.models.deep || '';
-      const briefModel = b.config.models.brief || settings.models.brief || '';
-      const crewPaused = crewAtCap && (isCrewModel(deepModel) || isCrewModel(briefModel));
+      const boardUsesCrew = (curBoard: Board, curSettings: AppSettings) =>
+        ROLES.some((role) => isCrewModel(curBoard.config.models[role] || curSettings.models[role] || ''));
+      const crewPaused = crewAtCap && boardUsesCrew(b, settings);
+      const freshCounts = (st: BoardState) => {
+        const curTime = now();
+        const curDay = localDay(new Date(curTime));
+        const curSettings = deps.settings();
+        const curBoard = repo.getBoard(b.id) ?? b;
+        const curSpent = repo.spentOn(b.id, curDay);
+        const curCrew = (typeof repo.crewCallsOn === 'function' ? repo.crewCallsOn(curDay) : 0) >= curSettings.crewCallsPerDay;
+        const paused = curCrew && boardUsesCrew(curBoard, curSettings);
+        return {
+          stepsLastHour: st.steps.length,
+          spentToday: Math.round(curSpent * 10000) / 10000,
+          ...(paused ? { crewPaused: true } : {}),
+        };
+      };
       const counts = { stepsLastHour: s.steps.length, spentToday: Math.round(boardSpent * 10000) / 10000, ...(crewPaused ? { crewPaused: true } : {}) };
       const d = rateCheck({
         now: t, activeHours, steps: s.steps, lastAt: s.lastAt, paceSeconds: b.config.autopilotSeconds,
@@ -148,6 +185,45 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
         publish(b.id, s, { state: d.reason, until: d.until, last: s.status.last, ...counts });
         continue;
       }
+      if (crewAtCap && s.crewPausedDay === day) {
+        publish(b.id, s, {
+          state: 'crew_cap',
+          code: 'crew_cap',
+          message: s.crewPausedMsg ?? `Daily crew limit (${crewCallsPerDay}) reached; resumes tomorrow`,
+          until: nextLocalMidnight(t),
+          last: s.status.last,
+          ...counts,
+          crewPaused: true,
+        });
+        continue;
+      }
+
+      const handleFailure = (st: BoardState, code: string, message: string) => {
+        const curTime = now();
+        const curDay = localDay(new Date(curTime));
+        if (code === 'crew_cap') {
+          st.crewPausedDay = curDay;
+          st.crewPausedMsg = message || 'Daily crew limit reached; resumes tomorrow';
+          st.lastAt = curTime;
+          publish(b.id, st, {
+            state: 'crew_cap', code: 'crew_cap', message: st.crewPausedMsg,
+            until: nextLocalMidnight(curTime), ...freshCounts(st), crewPaused: true,
+          });
+        } else if (code === 'global_budget' || code === 'board_budget') {
+          st.lastAt = curTime;
+          publish(b.id, st, {
+            state: code, code, message,
+            until: nextLocalMidnight(curTime), ...freshCounts(st),
+          });
+        } else {
+          st.errors++;
+          st.lastErrorAt = st.lastAt = curTime;
+          publish(b.id, st, {
+            state: 'error', code, message,
+            until: curTime + backoffMs(st.errors), ...freshCounts(st),
+          });
+        }
+      };
 
       // Check daily deep cross first (1h after activeHours.start, once per local day per auto board).
       if (typeof engine.deepCross === 'function' && deepPausedDay.get(b.id) !== day) {
@@ -159,16 +235,19 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
             s.busy = true;
             publish(b.id, s, { state: 'running', last: s.status.last, ...counts });
             const st = s;
-            engine
+            const task = engine
               .deepCross(b.id)
-              .then(() => {
+              .then((r) => {
                 st.steps.push(now());
+                if (r?.error) {
+                  handleFailure(st, r.error.code, r.error.message);
+                  return;
+                }
                 st.lastAt = now();
                 st.errors = 0;
                 publish(b.id, st, {
                   state: 'pace', until: now() + b.config.autopilotSeconds * 1000,
-                  last: 'deep', stepsLastHour: st.steps.length, spentToday: counts.spentToday,
-                  ...(crewPaused ? { crewPaused: true } : {}),
+                  last: 'deep', ...freshCounts(st),
                 });
               })
               .catch((e: any) => {
@@ -177,17 +256,17 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
                   st.lastAt = now();
                   publish(b.id, st, {
                     state: 'pace', until: now() + b.config.autopilotSeconds * 1000,
-                    last: st.status.last, stepsLastHour: st.steps.length, spentToday: counts.spentToday, crewPaused: true,
+                    last: st.status.last, ...freshCounts(st), crewPaused: true,
                   });
                 } else {
-                  st.errors++;
-                  st.lastErrorAt = st.lastAt = now();
-                  publish(b.id, st, { state: 'error', code: e?.code ?? 'error', message: e?.message ?? String(e), until: now() + backoffMs(st.errors), ...counts });
+                  handleFailure(st, e?.code ?? 'error', e?.message ?? String(e));
                 }
               })
               .finally(() => {
                 st.busy = false;
+                pending.delete(task);
               });
+            pending.add(task);
             continue;
           }
         }
@@ -196,34 +275,29 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
       s.busy = true;
       publish(b.id, s, { state: 'running', last: s.status.last, ...counts });
       const st = s;
-      engine
+      const task = engine
         .autoStep(b.id)
         .then((r) => {
           if (r.did !== 'idle') st.steps.push(now());
+          if (r.error) {
+            handleFailure(st, r.error.code, r.error.message);
+            return;
+          }
           st.lastAt = now();
           st.errors = 0;
           publish(b.id, st, {
             state: r.did === 'idle' ? 'idle' : 'pace', until: now() + b.config.autopilotSeconds * 1000,
-            last: r.did === 'idle' ? r.reason : r.did, stepsLastHour: st.steps.length, spentToday: counts.spentToday,
-            ...(crewPaused ? { crewPaused: true } : {}),
+            last: r.did === 'idle' ? r.reason : r.did, ...freshCounts(st),
           });
         })
         .catch((e: any) => {
-          if (e?.code === 'crew_cap') {
-            st.lastAt = now();
-            publish(b.id, st, {
-              state: 'crew_cap', code: 'crew_cap', message: e?.message ?? 'Daily crew limit reached; resumes tomorrow',
-              until: nextLocalMidnight(now()), ...counts, crewPaused: true,
-            });
-          } else {
-            st.errors++;
-            st.lastErrorAt = st.lastAt = now();
-            publish(b.id, st, { state: 'error', code: e?.code ?? 'error', message: e?.message ?? String(e), until: now() + backoffMs(st.errors), ...counts });
-          }
+          handleFailure(st, e?.code ?? 'error', e?.message ?? String(e));
         })
         .finally(() => {
           st.busy = false;
+          pending.delete(task);
         });
+      pending.add(task);
     }
   }
 
@@ -231,15 +305,20 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
   return {
     tick,
     start() {
+      stopped = false;
       timer ??= setInterval(() => tick().catch((e) => console.error('[autopilot]', e)), deps.tickMs ?? 1000);
       return this;
     },
-    stop() {
+    async stop() {
+      stopped = true;
       if (timer) clearInterval(timer);
       timer = null;
+      while (pending.size) await Promise.all([...pending]);
     },
     status(boardId: number): AutopilotStatus {
-      return states.get(boardId)?.status ?? { state: 'manual' };
+      const st = states.get(boardId);
+      if (st) return st.status;
+      return repo.getBoard(boardId)?.config.mode === 'auto' ? { state: 'idle' } : { state: 'manual' };
     },
   };
 }

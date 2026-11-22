@@ -99,3 +99,22 @@ test('public scouts map live response shapes and fetch only the configured endpo
   assert.equal(site.searchParams.get('q'), 'site:workshop.example');
   assert.equal(site.searchParams.get('ceid'), 'US:en');
 });
+
+test('hackernews tolerates single item 502 and missing story time; JSON scouts guard non-array shapes', async () => {
+  const hnTransport: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === '/v0/topstories.json') return new Response(JSON.stringify([10, 11]), { status: 200 });
+    if (url.pathname === '/v0/item/10.json') return new Response('bad gateway', { status: 502 });
+    if (url.pathname === '/v0/item/11.json') return new Response(JSON.stringify({ id: 11, title: 'No Time Story' }), { status: 200 });
+    return new Response(JSON.stringify({ hits: [{ objectID: '20', title: 'Show OK', created_at: '2026-11-12T00:00:00Z' }] }), { status: 200 });
+  };
+  const hn = await hackernews(hnTransport);
+  assert.deepEqual(hn.map((f) => [f.externalId, f.publishedAt]), [
+    ['11', undefined],
+    ['20', '2026-11-12T00:00:00Z'],
+  ]);
+
+  const badShapeTransport: typeof fetch = async () => new Response(JSON.stringify({ message: 'rate limit' }), { status: 200 });
+  await assert.rejects(githubNew(badShapeTransport), /invalid repository list/i);
+  await assert.rejects(lobsters(badShapeTransport), /invalid story list/i);
+});

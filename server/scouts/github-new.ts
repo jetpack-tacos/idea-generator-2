@@ -7,8 +7,9 @@ export async function fetch(transport = globalThis.fetch, now = Date.now(), toke
   const url = `https://api.github.com/search/repositories?q=created:>${since}&sort=stars&order=desc&per_page=30`;
   const headers: Record<string, string> = { 'User-Agent': 'idea-generator', Accept: 'application/vnd.github+json' };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const { items }: { items: Repository[] } = await (await request(url, transport, headers)).json();
-  return items.map((repo) => ({
+  const data: { items?: Repository[] } = await (await request(url, transport, headers)).json();
+  if (!Array.isArray(data?.items)) throw new Error('GitHub returned invalid repository list');
+  return data.items.map((repo) => ({
     source: 'github-new', externalId: String(repo.id), title: repo.full_name,
     url: repo.html_url, summary: repo.description ?? '', publishedAt: repo.created_at,
   }));

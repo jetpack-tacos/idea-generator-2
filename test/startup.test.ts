@@ -9,8 +9,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../server/db.ts';
 import { startServer } from '../server/index.ts';
-import { todaySpend } from '../server/spend.ts';
-import { openSettings } from '../server/settings.ts';
+import { spendLogger, todaySpend } from '../server/spend.ts';
+import { isLocalAbsolute, mergeAppSettings, openSettings } from '../server/settings.ts';
 
 test('startup loads disk settings, waits overnight, then judges and budgets without an HTTP client', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'ideagen-start-'));
@@ -139,4 +139,38 @@ test('startup loads disk settings, waits overnight, then judges and budgets with
   assert.equal(savedSettings.scoutIntervalsHours.papers, 24);
   assert.deepEqual([savedSettings.interests, savedSettings.seedThreshold, savedSettings.seedsPerRound], ['TEST seedlings', 0.7, 1]);
   assert.ok(!readdirSync(dir).some((name) => name.endsWith('.tmp')));
+});
+
+test('spendLogger tolerates I/O errors; todaySpend tolerates CRLF and corrupted lines; settings support ~\\\\ and nested mkdir', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ideagen-spend-edge-'));
+  try {
+    // 1) todaySpend skips CRLF blank lines and truncated JSON lines
+    const spendPath = join(dir, 'spend.jsonl');
+    const now = new Date();
+    const good1 = JSON.stringify({ time: now.toISOString(), model: 'deepseek:deepseek-flash', boardId: 1, role: 'judge', inputTokens: 100, outputTokens: 20, costUsd: 0.001 });
+    writeFileSync(spendPath, `${good1}\r\n\r\n{"truncated":\r\n${good1}\r\n`, 'utf8');
+    assert.deepEqual(todaySpend(spendPath, now), [
+      { model: 'deepseek:deepseek-flash', calls: 2, inputTokens: 200, outputTokens: 40, costUsd: 0.002 },
+    ]);
+
+    // 2) spendLogger does not throw if target path is unwritable (parent is a regular file)
+    const blocker = join(dir, 'not-a-dir');
+    writeFileSync(blocker, 'x', 'utf8');
+    const log = spendLogger(join(blocker, 'spend.jsonl'));
+    assert.doesNotThrow(() => log({ model: 'deepseek:deepseek-flash', boardId: 1, role: 'judge', inputTokens: 1, outputTokens: 1, costUsd: 0 }));
+
+    // 3) openSettings().set() creates missing parent directories; mergeAppSettings accepts ~\ paths and rejects UNC/drive-relative on Windows
+    const nestedFile = join(dir, 'nested', 'cfg', 'settings.local.json');
+    const store = openSettings(nestedFile);
+    const updated = mergeAppSettings({ projectsRoot: '~\\Coding\\idea-projects' });
+    assert.doesNotThrow(() => store.set(updated));
+    assert.equal(openSettings(nestedFile).get().projectsRoot, '~\\Coding\\idea-projects');
+    if (process.platform === 'win32') {
+      assert.equal(isLocalAbsolute('/foo'), false);
+      assert.equal(isLocalAbsolute('\\\\server\\share\\x'), false);
+      assert.equal(isLocalAbsolute('C:/tools/crew.py'), true);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

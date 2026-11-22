@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { readdir, stat } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { judgeManySessions, type SessionJudgement } from './filter.ts';
 import type { Find } from './http.ts';
@@ -23,7 +24,7 @@ export function extractUserMessageText(row: any): string | null {
   let content: unknown = null;
   if (row.role === 'user') {
     content = row.content ?? row.text;
-  } else if (row.message && typeof row.message === 'object' && (row.message.role === 'user' || row.type === 'user')) {
+  } else if (row.message && typeof row.message === 'object' && (row.message.role === 'user' || (row.type === 'user' && !row.message.role))) {
     content = row.message.content ?? row.message.text;
   } else if (row.author && typeof row.author === 'object' && row.author.role === 'user') {
     content = row.content;
@@ -69,7 +70,8 @@ function deriveTitle(excerpt: string): string {
 
 async function listRecentJsonl(root: string, cutoffMs: number): Promise<string[]> {
   const out: string[] = [];
-  async function walk(dir: string) {
+  async function walk(dir: string, depth: number) {
+    if (depth > 8) return;
     let entries;
     try {
       entries = await readdir(dir, { withFileTypes: true });
@@ -77,9 +79,10 @@ async function listRecentJsonl(root: string, cutoffMs: number): Promise<string[]
       return;
     }
     for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
-        await walk(full);
+        await walk(full, depth + 1);
       } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.jsonl')) {
         try {
           const st = await stat(full);
@@ -90,8 +93,55 @@ async function listRecentJsonl(root: string, cutoffMs: number): Promise<string[]
       }
     }
   }
-  await walk(root);
+  await walk(root, 0);
   return out.sort();
+}
+
+async function readJsonlLines(file: string, onLine: (line: string, idx: number) => void, maxLineChars = 512 * 1024): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(file, { encoding: 'utf8', highWaterMark: 64 * 1024 });
+    let buf = '';
+    let dropping = false;
+    let idx = 0;
+    stream.on('data', (chunk: string | Buffer) => {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+      let start = 0;
+      while (true) {
+        const nl = text.indexOf('\n', start);
+        if (nl < 0) {
+          const rest = text.slice(start);
+          if (!dropping) {
+            if (buf.length + rest.length > maxLineChars) {
+              buf = '';
+              dropping = true;
+            } else {
+              buf += rest;
+            }
+          }
+          break;
+        }
+        const segment = text.slice(start, nl);
+        if (!dropping) {
+          const full = buf + segment;
+          buf = '';
+          if (full.length <= maxLineChars) {
+            const trimmed = full.trim();
+            if (trimmed) onLine(trimmed, idx);
+          }
+        } else {
+          dropping = false;
+          buf = '';
+        }
+        idx++;
+        start = nl + 1;
+      }
+    });
+    stream.on('end', () => {
+      if (!dropping && buf.trim()) onLine(buf.trim(), idx);
+      resolve();
+    });
+    stream.on('error', reject);
+  });
 }
 
 export type SessionFind = Find & { score: number };
@@ -101,13 +151,14 @@ export async function fetchSessionWishes(opts: {
   judgeManyPath: string;
   now?: number;
   judgeSessions?: (path: string, items: { id: string; text: string }[]) => Promise<Map<string, SessionJudgement>>;
+  seen?: (id: string) => boolean;
+  markSeen?: (ids: string[]) => void;
   log?: (message: string) => void;
 }): Promise<SessionFind[]> {
   const root = opts.sessionsPath.trim();
   const judgePath = opts.judgeManyPath.trim();
   if (!root || !judgePath) return [];
   const now = opts.now ?? Date.now();
-  const log = opts.log ?? console.log;
   const judgeFn = opts.judgeSessions ?? judgeManySessions;
 
   const files = await listRecentJsonl(root, now - THREE_DAYS_MS);
@@ -116,41 +167,31 @@ export async function fetchSessionWishes(opts: {
   const items: { id: string; text: string }[] = [];
   const seenIds = new Set<string>();
   for (const file of files) {
-    let raw: string;
+    const rel = relative(root, file).replace(/\\/g, '/');
     try {
-      raw = await readFile(file, 'utf8');
+      await readJsonlLines(file, (line, idx) => {
+        let parsed: any;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          return;
+        }
+        const text = extractUserMessageText(parsed);
+        if (!text) return;
+        const id = createHash('sha256').update(`${rel}:${idx}:${text.slice(0, 200)}`).digest('hex').slice(0, 16);
+        if (seenIds.has(id) || opts.seen?.(id)) return;
+        seenIds.add(id);
+        items.push({ id, text: text.slice(0, 4000) });
+      });
     } catch {
       continue;
-    }
-    const rel = relative(root, file).replace(/\\/g, '/');
-    const lines = raw.split(/\r?\n/);
-    for (let idx = 0; idx < lines.length; idx++) {
-      const line = lines[idx].trim();
-      if (!line) continue;
-      let parsed: any;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      const text = extractUserMessageText(parsed);
-      if (!text) continue;
-      const id = createHash('sha256').update(`${rel}:${idx}:${text.slice(0, 200)}`).digest('hex').slice(0, 16);
-      if (seenIds.has(id)) continue;
-      seenIds.add(id);
-      items.push({ id, text: text.slice(0, 4000) });
     }
   }
   if (!items.length) return [];
 
-  let scores: Map<string, SessionJudgement>;
-  try {
-    scores = await judgeFn(judgePath, items);
-  } catch (error: any) {
-    // Never fall back to a cloud model for private session messages.
-    log(`[scouts] sessions skipped (judge_many unavailable): ${error?.message ?? error}`);
-    return [];
-  }
+  // Never fall back to a cloud model: if judge_many fails, let the caller record the error and skip cloud scoring.
+  const scores = await judgeFn(judgePath, items);
+  opts.markSeen?.(items.map((item) => item.id));
 
   const finds: SessionFind[] = [];
   for (const item of items) {

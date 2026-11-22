@@ -118,3 +118,56 @@ with open(args.out, 'w', encoding='utf-8') as f:
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('deleting an idea or parent while deepCross or judge is in flight does not crash with FK error', async () => {
+  const repo = openDb(':memory:');
+  try {
+    const board = repo.createBoard({ title: 'DeleteRace', config: { autoProjectOnGold: false } });
+    const s1 = repo.insertIdea({ boardId: board.id, title: 'P1', pitch: 'p', kind: 'seed', seedSource: 'hackernews', x: 0, y: 0, generation: 0 });
+    const s2 = repo.insertIdea({ boardId: board.id, title: 'P2', pitch: 'p', kind: 'seed', seedSource: 'lobsters', x: 10, y: 0, generation: 0 });
+    const s3 = repo.insertIdea({ boardId: board.id, title: 'P3', pitch: 'p', kind: 'seed', seedSource: 'papers', x: 20, y: 0, generation: 0 });
+    repo.saveJudgement(s1.id, { originality: 4, feasibility: 4, impact: 3, reason: 'ok' });
+    repo.saveJudgement(s2.id, { originality: 4, feasibility: 4, impact: 3, reason: 'ok' });
+    repo.saveJudgement(s3.id, { originality: 4, feasibility: 4, impact: 3, reason: 'ok' });
+
+    const chat = async (r: ChatRequest) => {
+      if (r.schemaName === 'deep_cross') {
+        // Delete s3 while deepCross is in flight
+        repo.deleteIdea(s3.id);
+        return {
+          value: {
+            ideas: [
+              { title: 'Survives', pitch: 'Joins s1 and s2', parents: [s1.id, s2.id] },
+              { title: 'PartialDeleted', pitch: 'Had deleted s3', parents: [s1.id, s2.id, s3.id] },
+              { title: 'TooFewLeft', pitch: 'Only s1 + deleted s3', parents: [s1.id, s3.id] },
+            ],
+          },
+          costUsd: 0,
+        };
+      }
+      if (r.schemaName === 'judgement') {
+        return { value: { reason: 'ok', originality: 3, feasibility: 3, impact: 3, keywords: ['k'] }, costUsd: 0 };
+      }
+      return { value: {}, costUsd: 0 };
+    };
+    // The deep role defaults to a crew model, which needs a crew path; the fake chat never runs it.
+    const eng = createEngine({ repo, chat, settings: () => ({ ...DEFAULT_APP_SETTINGS, crewPath: 'C:/fake/crew.py' }), gitInit: false });
+    const out = await eng.deepCross(board.id);
+    assert.equal(out.ideas.length, 2, 'ideas with >= 2 surviving parents still succeed; 1-parent survivor skipped');
+
+    // Deleting an idea while judge() is in flight throws AppError not_found instead of SQLite FK error
+    const doomed = repo.insertIdea({ boardId: board.id, title: 'Doomed', pitch: 'p', kind: 'seed', x: 0, y: 0, generation: 0 });
+    const engJudge = createEngine({
+      repo,
+      chat: async () => {
+        repo.deleteIdea(doomed.id);
+        return { value: { reason: 'ok', originality: 3, feasibility: 3, impact: 3, keywords: ['k'] }, costUsd: 0 };
+      },
+      settings: () => DEFAULT_APP_SETTINGS,
+      gitInit: false,
+    });
+    await assert.rejects(engJudge.judge(doomed.id), (e: any) => e.code === 'not_found');
+  } finally {
+    repo.close();
+  }
+});

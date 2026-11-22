@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS ideas (
   exists_reason TEXT,
   exists_attempts INTEGER NOT NULL DEFAULT 0,
   exists_checked_at TEXT,
+  brief_attempts INTEGER NOT NULL DEFAULT 0,
   origin_idea_id INTEGER REFERENCES ideas(id) ON DELETE SET NULL,
   origin_board_id INTEGER REFERENCES boards(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -125,6 +126,16 @@ CREATE TABLE IF NOT EXISTS crew_usage (
   day TEXT PRIMARY KEY,
   calls INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS seen_sessions (
+  id TEXT PRIMARY KEY,
+  seen_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS seen_sessions_age ON seen_sessions(seen_at);
+CREATE TABLE IF NOT EXISTS pending_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 `;
 
 // Templates for a board's creation flow. The prompts are in English; the
@@ -144,7 +155,7 @@ export const DEFAULT_TEMPLATES = [
     system:
       'You are a systems thinker working on sustainability and local communities. You favour solutions that cut resource use and that ordinary people and municipalities can start with today.',
     expand:
-      'Generate 3 ideas that grow out of the concept and make it more sustainable socially, ecologically or economically. Make them differ in scale: household, organisation, and region.',
+      'Generate 3 ideas that grow out of the concept and make it more sustainable socially, ecologically or practically. Make them differ in scale: household, organisation, and region.',
     combine:
       'Combine the two ideas into ONE solution where the sustainability gain of one multiplies the other. Be concrete about what changes.',
   },
@@ -278,6 +289,7 @@ export type Idea = {
   existsReason: string | null;
   existsAttempts: number;
   existsCheckedAt: string | null;
+  briefAttempts: number;
   originIdeaId: number | null;
   originBoardId: number | null;
   originBoardTitle: string | null;
@@ -341,6 +353,7 @@ const ideaFromRow = (r: any): Idea => ({
   existsReason: r.exists_reason ?? null,
   existsAttempts: r.exists_attempts ?? 0,
   existsCheckedAt: r.exists_checked_at ?? null,
+  briefAttempts: r.brief_attempts ?? 0,
   originIdeaId: r.origin_idea_id,
   originBoardId: r.origin_board_id,
   originBoardTitle: r.origin_board_title ?? null,
@@ -395,6 +408,7 @@ function templateFromRow(template: Template): Template {
 export function openDb(file: string) {
   const db = new DatabaseSync(file);
   db.exec('PRAGMA foreign_keys = ON;');
+  db.exec('PRAGMA busy_timeout = 5000;');
   if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
   db.exec(SCHEMA);
 
@@ -433,6 +447,7 @@ export function openDb(file: string) {
     ['exists_reason', 'TEXT'],
     ['exists_attempts', 'INTEGER NOT NULL DEFAULT 0'],
     ['exists_checked_at', 'TEXT'],
+    ['brief_attempts', 'INTEGER NOT NULL DEFAULT 0'],
   ] as const) {
     if (!hasCol('ideas', col)) db.exec(`ALTER TABLE ideas ADD COLUMN ${col} ${def};`);
   }
@@ -542,6 +557,10 @@ export function openDb(file: string) {
     },
     incrementExistsAttempt(id: number) {
       db.prepare('UPDATE ideas SET exists_attempts = exists_attempts + 1 WHERE id = ?').run(id);
+      return repo.getIdea(id);
+    },
+    incrementBriefAttempt(id: number) {
+      db.prepare('UPDATE ideas SET brief_attempts = brief_attempts + 1 WHERE id = ?').run(id);
       return repo.getIdea(id);
     },
     setKeywords(id: number, keywords: string[]) {
@@ -848,6 +867,30 @@ export function openDb(file: string) {
     crewCallsOn(day = localDay()): number {
       const r: any = db.prepare('SELECT calls FROM crew_usage WHERE day = ?').get(day);
       return r?.calls ?? 0;
+    },
+
+    // ---- seen private session messages & deferred night alerts
+    hasSeenSession(id: string): boolean {
+      return Boolean(db.prepare('SELECT 1 FROM seen_sessions WHERE id = ?').get(id));
+    },
+    markSeenSessions(ids: string[], time: number) {
+      const ins = db.prepare('INSERT OR IGNORE INTO seen_sessions (id, seen_at) VALUES (?, ?)');
+      tx(() => {
+        for (const id of ids) ins.run(id, time);
+      });
+    },
+    pruneSeenSessions(cutoff: number) {
+      return db.prepare('DELETE FROM seen_sessions WHERE seen_at <= ?').run(cutoff).changes;
+    },
+    queueAlert(title: string, time: number) {
+      db.prepare('INSERT INTO pending_alerts (title, created_at) VALUES (?, ?)').run(title, time);
+    },
+    takePendingAlerts(): string[] {
+      return tx(() => {
+        const rows = db.prepare('SELECT id, title FROM pending_alerts ORDER BY id').all() as { id: number; title: string }[];
+        if (rows.length) db.prepare('DELETE FROM pending_alerts WHERE id <= ?').run(rows.at(-1)!.id);
+        return rows.map((r) => r.title);
+      });
     },
   };
   return repo;

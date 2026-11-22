@@ -84,7 +84,11 @@ for (const [provider, model, key, cache, cost] of [
     assert.equal(seen[0].path, '/chat/completions');
     assert.equal(seen[0].headers.authorization, `Bearer ${key}`);
     assert.deepEqual(seen[0].body.response_format, { type: 'json_schema', json_schema: { schema, name: 'idea', strict: true } });
-    assert.equal(seen[0].body.reasoning_effort, provider === 'zai' ? 'low' : 'none');
+    if (provider === 'zai') {
+      assert.equal(seen[0].body.reasoning_effort, 'low');
+    } else {
+      assert.ok(!('reasoning_effort' in seen[0].body), 'deepseek must not send unsolicited reasoning_effort');
+    }
     assert.ok(!('thinking' in seen[0].body));
 
     seen.length = attempts.length = 0;
@@ -140,9 +144,44 @@ test('Anthropic (SDK): output_config with JSON schema and low effort, no tempera
   assert.equal(s.body.system, 'sys');
 });
 
-test('model lists double as a connection test', async () => {
+test('model lists double as a connection test and refuse redirects', async () => {
   script = () => ({ status: 200, body: { data: [{ id: 'b' }, { id: 'a' }] } });
   assert.deepEqual(await listModels('deepseek', { deepseek: base }), ['a', 'b']);
   assert.equal(seen.at(-1)!.path, '/models');
   await assert.rejects(listModels('deepseek', { deepseek: 'http://127.0.0.1:1' }), (e: any) => e.code === 'unreachable');
+
+  const redirServer = createServer((_req, res) => {
+    res.writeHead(302, { Location: `${base}/models` }).end();
+  });
+  await new Promise<void>((r) => redirServer.listen(0, '127.0.0.1', r));
+  try {
+    const redirBase = `http://127.0.0.1:${(redirServer.address() as any).port}`;
+    await assert.rejects(listModels('deepseek', { deepseek: redirBase }), (e: any) => e.code === 'unreachable');
+  } finally {
+    redirServer.close();
+  }
+});
+
+test('reasoning_effort 400 fallback and non-zero fallback pricing for unpriced paid models', async () => {
+  seen.length = 0;
+  script = (s) => 'reasoning_effort' in s.body
+    ? { status: 400, body: { error: 'Unsupported parameter: reasoning_effort' } }
+    : { status: 200, body: { ...oaiAnswer('{"title":"OK"}'), usage: { prompt_tokens: 1000, completion_tokens: 500 } } };
+  const chat = makeChat({ baseUrls: { zai: base, openai: base } });
+  const zaiOut = await chat(req('zai:glm-5.3-flash'));
+  assert.deepEqual(zaiOut.value, { title: 'OK' });
+  assert.equal(seen.length, 2);
+  assert.ok(!('reasoning_effort' in seen[1].body));
+
+  process.env.OPENAI_API_KEY = 'oa-test';
+  script = () => ({
+    status: 200,
+    body: { choices: [{ message: { content: '{"title":"OAI"}' } }], usage: { prompt_tokens: 1000, completion_tokens: 500 } },
+  });
+  const oaiOut = await chat(req('openai:future-unlisted-model'));
+  assert.ok(oaiOut.costUsd > 0, 'unpriced paid models record conservative non-zero spend');
+
+  const chatOr = makeChat({ baseUrls: { openrouter: base } });
+  const freeActual = await chatOr(req('openrouter:some/model:free'));
+  assert.equal(freeActual.costUsd, 0, ':free OpenRouter models stay $0');
 });

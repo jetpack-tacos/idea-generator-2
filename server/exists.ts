@@ -1,4 +1,6 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import type { ExistsVerdict } from './db.ts';
+import { normalizeUrl } from './leads.ts';
 import type { ChatFn } from './providers.ts';
 import { request } from './scouts/http.ts';
 
@@ -74,10 +76,11 @@ export async function generateExistsQueries(a: {
 
 export async function searchExistingTools(
   queries: string[],
-  opts: { transport?: typeof fetch; githubToken?: string } = {},
+  opts: { transport?: typeof fetch; githubToken?: string; delayMs?: number } = {},
 ): Promise<ExistingSearchResult[]> {
   const transport = opts.transport ?? globalThis.fetch;
   const token = opts.githubToken ?? process.env.GITHUB_TOKEN;
+  const delayMs = opts.delayMs ?? 500;
   const ghHeaders: Record<string, string> = {
     'User-Agent': 'idea-generator',
     Accept: 'application/vnd.github+json',
@@ -89,64 +92,64 @@ export async function searchExistingTools(
   let lastErr: unknown = null;
   const seen = new Map<string, ExistingSearchResult>();
 
-  await Promise.all(
-    queries.map(async (q) => {
-      const encoded = encodeURIComponent(q);
-      const [ghRes, hnRes] = await Promise.allSettled([
-        (async () => {
-          const res = await request(
-            `https://api.github.com/search/repositories?q=${encoded}&sort=stars&per_page=5`,
-            transport,
-            ghHeaders,
-          );
-          return res.json() as Promise<{ items?: any[] }>;
-        })(),
-        (async () => {
-          const res = await request(
-            `https://hn.algolia.com/api/v1/search?query=${encoded}&tags=story&hitsPerPage=5`,
-            transport,
-          );
-          return res.json() as Promise<{ hits?: any[] }>;
-        })(),
-      ]);
+  for (let idx = 0; idx < queries.length; idx++) {
+    if (idx > 0 && delayMs > 0) await delay(delayMs);
+    const q = queries[idx];
+    const encoded = encodeURIComponent(q);
+    const [ghRes, hnRes] = await Promise.allSettled([
+      (async () => {
+        const res = await request(
+          `https://api.github.com/search/repositories?q=${encoded}&sort=stars&per_page=5`,
+          transport,
+          ghHeaders,
+        );
+        return res.json() as Promise<{ items?: any[] }>;
+      })(),
+      (async () => {
+        const res = await request(
+          `https://hn.algolia.com/api/v1/search?query=${encoded}&tags=story&hitsPerPage=5`,
+          transport,
+        );
+        return res.json() as Promise<{ hits?: any[] }>;
+      })(),
+    ]);
 
-      if (ghRes.status === 'fulfilled') {
-        ghSuccess++;
-        for (const item of (ghRes.value?.items ?? []).slice(0, 5)) {
-          const url = String(item?.html_url ?? '').trim();
-          if (!/^https?:\/\//i.test(url) || seen.has(url)) continue;
-          const stars = Number.isFinite(item?.stargazers_count) ? `${item.stargazers_count}★` : '';
-          const desc = String(item?.description ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
-          seen.set(url, {
-            source: 'github',
-            title: String(item?.full_name ?? url),
-            url,
-            detail: [stars, desc].filter(Boolean).join(' · '),
-          });
-        }
-      } else {
-        lastErr = ghRes.reason;
+    if (ghRes.status === 'fulfilled') {
+      ghSuccess++;
+      for (const item of (Array.isArray(ghRes.value?.items) ? ghRes.value.items : []).slice(0, 5)) {
+        const url = String(item?.html_url ?? '').trim();
+        if (!/^https?:\/\//i.test(url) || seen.has(url)) continue;
+        const stars = Number.isFinite(item?.stargazers_count) ? `${item.stargazers_count}★` : '';
+        const desc = String(item?.description ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+        seen.set(url, {
+          source: 'github',
+          title: String(item?.full_name ?? url),
+          url,
+          detail: [stars, desc].filter(Boolean).join(' · '),
+        });
       }
+    } else {
+      lastErr = ghRes.reason;
+    }
 
-      if (hnRes.status === 'fulfilled') {
-        hnSuccess++;
-        for (const hit of (hnRes.value?.hits ?? []).slice(0, 5)) {
-          const hnUrl = hit?.objectID ? `https://news.ycombinator.com/item?id=${hit.objectID}` : '';
-          const url = String(hit?.url || hnUrl).trim();
-          if (!/^https?:\/\//i.test(url) || seen.has(url)) continue;
-          const pts = Number.isFinite(hit?.points) ? `${hit.points} pts` : '';
-          seen.set(url, {
-            source: 'hn',
-            title: String(hit?.title ?? url),
-            url,
-            detail: pts,
-          });
-        }
-      } else {
-        lastErr = hnRes.reason;
+    if (hnRes.status === 'fulfilled') {
+      hnSuccess++;
+      for (const hit of (Array.isArray(hnRes.value?.hits) ? hnRes.value.hits : []).slice(0, 5)) {
+        const hnUrl = hit?.objectID ? `https://news.ycombinator.com/item?id=${hit.objectID}` : '';
+        const url = String(hit?.url || hnUrl).trim();
+        if (!/^https?:\/\//i.test(url) || seen.has(url)) continue;
+        const pts = Number.isFinite(hit?.points) ? `${hit.points} pts` : '';
+        seen.set(url, {
+          source: 'hn',
+          title: String(hit?.title ?? url),
+          url,
+          detail: pts,
+        });
       }
-    }),
-  );
+    } else {
+      lastErr = hnRes.reason;
+    }
+  }
 
   if (!ghSuccess || !hnSuccess) {
     throw new Error(`Search incomplete (GitHub ${ghSuccess}/${queries.length}, HN ${hnSuccess}/${queries.length}): ${(lastErr as any)?.message ?? lastErr ?? 'failed'}`);
@@ -190,9 +193,17 @@ export async function judgeExistingTool(a: {
     throw new Error(`Invalid exists verdict: ${String(verdict)}`);
   }
   const rawUrl = String(value?.url ?? '').trim();
-  const url = /^https?:\/\//i.test(rawUrl) ? rawUrl.slice(0, 500) : null;
-  const reason = String(value?.reason ?? '').trim().slice(0, 400) || (verdict === 'new' ? 'No equivalent tool found in search results.' : 'Related work found.');
-  return { verdict, url, reason, costUsd };
+  const normRaw = /^https?:\/\//i.test(rawUrl) ? normalizeUrl(rawUrl) : null;
+  const matched = normRaw
+    ? a.results.find((r) => r.url === rawUrl || normalizeUrl(r.url) === normRaw)
+    : undefined;
+  const url = matched ? matched.url.slice(0, 500) : null;
+  let finalVerdict: ExistsVerdict = verdict;
+  if (finalVerdict === 'exists' && !url) {
+    finalVerdict = a.results.length ? 'partial' : 'new';
+  }
+  const reason = String(value?.reason ?? '').trim().slice(0, 400) || (finalVerdict === 'new' ? 'No equivalent tool found in search results.' : 'Related work found.');
+  return { verdict: finalVerdict, url, reason, costUsd };
 }
 
 export async function checkIdeaExists(a: {

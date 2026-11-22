@@ -4,7 +4,8 @@
 // is published on a per-board bus that the browser follows over SSE.
 
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { statSync } from 'node:fs';
+import { activeHoursUntil } from './autopilot.ts';
 import { localDay, type Repo, type Idea, type Board, type StoredFind } from './db.ts';
 import { makeLLM } from './llm.ts';
 import { asUrl, fetchPage as realFetchPage } from './extract.ts';
@@ -193,6 +194,23 @@ export function createEngine(deps: Deps) {
           throw new ProviderError('crew_cap', `Daily crew limit (${crewCallsPerDay}) reached; resumes tomorrow`);
         }
         repo.addCrewCall(day);
+      } else {
+        const isFree = /:free$/i.test(request.model);
+        const globalLimit = deps.settings().maxUsdPerDay;
+        const globalSpent = repo.spentOn(null, day);
+        if ((globalSpent > 0 && globalSpent >= globalLimit) || (globalLimit <= 0 && !isFree)) {
+          throw new AppError(429, 'global_budget', 'Daily global budget reached; resumes tomorrow');
+        }
+        if (boardId > 0) {
+          const board = repo.getBoard(boardId);
+          if (board) {
+            const boardLimit = board.config.rate.usdPerDay;
+            const boardSpent = repo.spentOn(boardId, day);
+            if ((boardSpent > 0 && boardSpent >= boardLimit) || (boardLimit <= 0 && !isFree)) {
+              throw new AppError(429, 'board_budget', 'Board daily budget reached; resumes tomorrow');
+            }
+          }
+        }
       }
       let recorded = false;
       const result = await deps.chat({
@@ -214,6 +232,26 @@ export function createEngine(deps: Deps) {
     }
   }
 
+  async function sendOrQueueAlert(title: string) {
+    if (activeHoursUntil(now(), deps.settings().activeHours) !== null) {
+      repo.queueAlert(title, now());
+      return;
+    }
+    await sendAlert(deps.settings().alertCommand, title, { logFile: deps.alertLogFile });
+  }
+
+  async function flushAlerts() {
+    if (activeHoursUntil(now(), deps.settings().activeHours) !== null) return;
+    const pending = repo.takePendingAlerts();
+    for (let i = 0; i < pending.length; i++) {
+      if (activeHoursUntil(now(), deps.settings().activeHours) !== null) {
+        for (let j = i; j < pending.length; j++) repo.queueAlert(pending[j], now());
+        break;
+      }
+      await sendAlert(deps.settings().alertCommand, pending[i], { logFile: deps.alertLogFile });
+    }
+  }
+
   // ---------------------------------------------------------------- judging
 
   function setJudging(boardId: number, ids: number[], on: boolean) {
@@ -223,11 +261,18 @@ export function createEngine(deps: Deps) {
 
   async function makeProject(requested: Idea) {
     const idea = mustIdea(requested.id);
-    if (idea.projectPath && existsSync(idea.projectPath)) return { idea, path: idea.projectPath, existed: true };
+    let hasDir = false;
+    try {
+      hasDir = Boolean(idea.projectPath && statSync(idea.projectPath).isDirectory());
+    } catch {
+      hasDir = false;
+    }
+    if (hasDir) return { idea, path: idea.projectPath!, existed: true };
     const board = mustBoard(idea.boardId);
     const lineage = repo.lineage(idea.id);
 
     const { brief } = await call(board.id, 'brief', (_llm, chat) => writeBrief({ chat, model: modelFor(board, 'brief'), idea, goal: board.goal, lineage }));
+    if (!repo.getIdea(idea.id)) throw new AppError(404, 'not_found', 'Idea not found');
     let path: string;
     try {
       path = await writeProject({
@@ -243,7 +288,8 @@ export function createEngine(deps: Deps) {
     } catch (e: any) {
       throw new AppError(500, 'project_failed', e?.message ?? String(e));
     }
-    const saved = repo.setProjectPath(idea.id, path)!;
+    const saved = repo.setProjectPath(idea.id, path);
+    if (!saved) throw new AppError(404, 'not_found', 'Idea not found');
     emitIdeas(board.id, [saved]);
     return { idea: saved, path, existed: false };
   }
@@ -258,9 +304,12 @@ export function createEngine(deps: Deps) {
     return pending;
   }
 
-  const existsInProgress = new Map<number, Promise<{ idea: Idea; project?: string; projectError?: string }>>();
+  const existsInProgress = new Map<number, Promise<{ idea: Idea; project?: string; projectError?: string; projectErrorCode?: string }>>();
 
-  async function runGoldPipeline(board: Board, idea: Idea): Promise<{ idea: Idea; project?: string; projectError?: string }> {
+  async function runGoldPipeline(
+    board: Board,
+    idea: Idea,
+  ): Promise<{ idea: Idea; project?: string; projectError?: string; projectErrorCode?: string }> {
     const current = mustIdea(idea.id);
     if (current.projectPath) return { idea: current };
     if (current.existsVerdict === 'exists') return { idea: current };
@@ -278,32 +327,47 @@ export function createEngine(deps: Deps) {
             transport: deps.searchTransport,
           }),
         );
+        if (!repo.getIdea(checked.id)) throw new AppError(404, 'not_found', 'Idea not found');
         checked = repo.saveExistsResult(checked.id, { verdict: res.verdict, url: res.url, reason: res.reason })!;
         emitIdeas(board.id, [checked]);
       } catch (e: any) {
-        checked = repo.incrementExistsAttempt(checked.id)!;
-        emitIdeas(board.id, [checked]);
-        return { idea: checked, projectError: e?.message ?? String(e) };
+        if (e?.code === 'not_found') throw e;
+        const code = e?.code ?? 'exists_failed';
+        if (code === 'crew_cap') {
+          bus.emit(board.id, { type: 'crew_paused', role: 'exists', message: e.message });
+          return { idea: checked, projectError: e?.message ?? String(e), projectErrorCode: code };
+        }
+        if (code !== 'global_budget' && code !== 'board_budget') {
+          checked = repo.incrementExistsAttempt(checked.id) ?? checked;
+          emitIdeas(board.id, [checked]);
+        }
+        return { idea: checked, projectError: e?.message ?? String(e), projectErrorCode: code };
       }
 
       if (checked.existsVerdict === 'exists') {
-        await sendAlert(deps.settings().alertCommand, `Existing tool found: ${checked.title}`, { logFile: deps.alertLogFile });
+        await sendOrQueueAlert(`Existing tool found: ${checked.title}`);
         return { idea: checked };
       }
     }
 
+    if (checked.briefAttempts >= 3) return { idea: checked };
     try {
       const p = await createProject(checked);
       bus.emit(board.id, { type: 'project', ideaId: checked.id, path: p.path, byJudge: true });
       if (!p.existed) {
-        await sendAlert(deps.settings().alertCommand, `Gold idea: ${checked.title}`, { logFile: deps.alertLogFile });
+        await sendOrQueueAlert(`Gold idea: ${checked.title}`);
       }
       return { idea: p.idea, project: p.path };
     } catch (e: any) {
-      if (e?.code === 'crew_cap') {
+      if (e?.code === 'not_found') throw e;
+      const code = e?.code ?? 'project_failed';
+      if (code === 'crew_cap') {
         bus.emit(board.id, { type: 'crew_paused', role: 'brief', message: e.message });
+      } else if (code !== 'global_budget' && code !== 'board_budget') {
+        checked = repo.incrementBriefAttempt(checked.id) ?? checked;
+        emitIdeas(board.id, [checked]);
       }
-      return { idea: checked, projectError: e?.message ?? String(e) };
+      return { idea: checked, projectError: e?.message ?? String(e), projectErrorCode: code };
     }
   }
 
@@ -327,8 +391,11 @@ export function createEngine(deps: Deps) {
           guidance: board.config.judgeGuidance, vocabulary: repo.keywordVocabulary(),
         }),
       );
+      if (!repo.getIdea(idea.id)) throw new AppError(404, 'not_found', 'Idea not found');
       repo.saveJudgement(idea.id, judgement);
-      let out: { idea: Idea; project?: string; projectError?: string } = { idea: repo.setKeywords(idea.id, judgement.keywords)! };
+      const saved = repo.setKeywords(idea.id, judgement.keywords);
+      if (!saved) throw new AppError(404, 'not_found', 'Idea not found');
+      let out: { idea: Idea; project?: string; projectError?: string; projectErrorCode?: string } = { idea: saved };
       // On gold, check whether the tool already exists before creating a project folder.
       if (board.config.autoProjectOnGold && medal(out.idea) === 3 && !out.idea.projectPath) {
         out = await handleGold(board, out.idea);
@@ -372,17 +439,44 @@ export function createEngine(deps: Deps) {
 
   // ---------------------------------------------------------------- creating ideas
 
+  async function judgeSequential(ids: number[]): Promise<{ code: string; message: string } | undefined> {
+    let firstError: { code: string; message: string } | undefined;
+    let anyFatal: unknown;
+    let anySuccess = false;
+    for (const id of ids) {
+      try {
+        const out = await judge(id);
+        anySuccess = true;
+        if (out.projectError && !firstError) {
+          firstError = { code: out.projectErrorCode ?? 'gold_failed', message: out.projectError };
+        }
+      } catch (e: any) {
+        if (e?.code === 'not_found') continue;
+        if (e?.code === 'crew_cap' || e?.code === 'global_budget' || e?.code === 'board_budget') {
+          if (!anySuccess) throw e;
+          firstError ??= { code: e.code, message: e.message };
+          break;
+        }
+        anyFatal ??= e;
+      }
+    }
+    if (!anySuccess && anyFatal) throw anyFatal;
+    return firstError;
+  }
+
   async function doExpand(parentId: number) {
     const parent = mustIdea(parentId);
     const board = mustBoard(parent.boardId);
     const { ideas } = await call(board.id, 'expand', (llm) =>
       llm.expand({ model: modelFor(board, 'expand'), flow: board.config.flow, board, idea: parent, existingTitles: titles(board.id) }),
     );
-    const spots = arcPositions(parent, repo.parentsOf(parent.id)[0] ?? null, ideas.length);
+    const liveParent = repo.getIdea(parent.id);
+    if (!liveParent) throw new AppError(404, 'not_found', 'Idea not found');
+    const spots = arcPositions(liveParent, repo.parentsOf(liveParent.id)[0] ?? null, ideas.length);
     const created = ideas.map((i, n) =>
-      repo.insertIdea({ boardId: board.id, ...i, kind: 'expand', x: spots[n].x, y: spots[n].y, generation: parent.generation + 1 }, [parent.id]),
+      repo.insertIdea({ boardId: board.id, ...i, kind: 'expand', x: spots[n].x, y: spots[n].y, generation: liveParent.generation + 1 }, [liveParent.id]),
     );
-    const edges = created.map((c) => ({ from: parent.id, to: c.id }));
+    const edges = created.map((c) => ({ from: liveParent.id, to: c.id }));
     emitIdeas(board.id, created);
     bus.emit(board.id, { type: 'edges', edges });
     return { ideas: created, edges };
@@ -397,22 +491,25 @@ export function createEngine(deps: Deps) {
     const { idea } = await call(board.id, 'combine', (llm) =>
       llm.combine({ model: modelFor(board, 'combine'), flow: board.config.flow, board, a, b: c, existingTitles: titles(board.id) }),
     );
-    const dx = c.x - a.x, dy = c.y - a.y, len = Math.hypot(dx, dy) || 1; // midpoint, nudged off the line
+    const liveA = repo.getIdea(a.id);
+    const liveC = repo.getIdea(c.id);
+    if (!liveA || !liveC) throw new AppError(404, 'not_found', 'Idea not found');
+    const dx = liveC.x - liveA.x, dy = liveC.y - liveA.y, len = Math.hypot(dx, dy) || 1; // midpoint, nudged off the line
     const created = repo.insertIdea(
       {
         boardId: board.id, ...idea, kind: 'combine',
-        x: (a.x + c.x) / 2 + (-dy / len) * 70, y: (a.y + c.y) / 2 + (dx / len) * 70,
-        generation: Math.max(a.generation, c.generation) + 1,
+        x: (liveA.x + liveC.x) / 2 + (-dy / len) * 70, y: (liveA.y + liveC.y) / 2 + (dx / len) * 70,
+        generation: Math.max(liveA.generation, liveC.generation) + 1,
       },
-      [a.id, c.id],
+      [liveA.id, liveC.id],
     );
-    const edges = [{ from: a.id, to: created.id }, { from: c.id, to: created.id }];
+    const edges = [{ from: liveA.id, to: created.id }, { from: liveC.id, to: created.id }];
     emitIdeas(board.id, [created]);
     bus.emit(board.id, { type: 'edges', edges });
     return { idea: created, edges };
   }
 
-  async function deepCross(boardId: number) {
+  async function deepCross(boardId: number): Promise<{ ideas: Idea[]; edges: { from: number; to: number }[]; error?: { code: string; message: string } }> {
     const board = mustBoard(boardId);
     const allIdeas = repo.listIdeas(board.id);
     const allEdges = repo.listEdges(board.id);
@@ -428,11 +525,13 @@ export function createEngine(deps: Deps) {
       }),
     );
 
-    const byId = new Map(allIdeas.map((i) => [i.id, i]));
+    if (!repo.getBoard(board.id)) return { ideas: [], edges: [] };
+    const liveById = new Map(repo.listIdeas(board.id).map((i) => [i.id, i]));
     const created: Idea[] = [];
     const edges: { from: number; to: number }[] = [];
     ideas.forEach((item, idx) => {
-      const parentIdeas = item.parents.map((pid) => byId.get(pid)).filter((p): p is Idea => Boolean(p));
+      const liveParentIds = item.parents.filter((pid) => liveById.has(pid));
+      const parentIdeas = liveParentIds.map((pid) => liveById.get(pid)!);
       if (parentIdeas.length < 2) return;
       const cx = parentIdeas.reduce((s, p) => s + p.x, 0) / parentIdeas.length;
       const cy = parentIdeas.reduce((s, p) => s + p.y, 0) / parentIdeas.length;
@@ -448,20 +547,18 @@ export function createEngine(deps: Deps) {
           y: cy + Math.sin(angle) * 90,
           generation: maxGen + 1,
         },
-        item.parents,
+        liveParentIds,
       );
       created.push(idea);
-      for (const pid of item.parents) edges.push({ from: pid, to: idea.id });
+      for (const pid of liveParentIds) edges.push({ from: pid, to: idea.id });
     });
 
     repo.setDeepCrossDay(board.id, localDay(new Date(now())));
     emitIdeas(board.id, created);
     if (edges.length) bus.emit(board.id, { type: 'edges', edges });
 
-    const results = await Promise.allSettled(created.map((c) => judge(c.id)));
-    const failed = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
-    if (failed && results.every((r) => r.status === 'rejected')) throw failed.reason;
-    return { ideas: created, edges };
+    const error = created.length ? await judgeSequential(created.map((c) => c.id)) : undefined;
+    return { ideas: created, edges, ...(error ? { error } : {}) };
   }
 
   return {
@@ -471,6 +568,7 @@ export function createEngine(deps: Deps) {
     queueJudge,
     modelFor,
     deepCross,
+    flushAlerts,
 
     async seed(boardId: number, b: { text: string; x?: number; y?: number }) {
       const board = mustBoard(boardId);
@@ -524,8 +622,14 @@ export function createEngine(deps: Deps) {
 
     reveal(ideaId: number) {
       const idea = mustIdea(ideaId);
-      if (!idea.projectPath || !existsSync(idea.projectPath)) throw new AppError(404, 'no_project', 'The project folder is gone');
-      reveal(idea.projectPath);
+      let isDir = false;
+      try {
+        isDir = Boolean(idea.projectPath && statSync(idea.projectPath).isDirectory());
+      } catch {
+        isDir = false;
+      }
+      if (!isDir) throw new AppError(404, 'no_project', 'The project folder is gone');
+      reveal(idea.projectPath!);
       return { ok: true };
     },
 
@@ -668,61 +772,90 @@ export function createEngine(deps: Deps) {
      * otherwise breed (combine by tournament selection) or mutate (expand a strong idea).
      * Awaits its own judgements so the next step sees the scores.
      */
-    async autoStep(boardId: number): Promise<{ did: 'idle' | 'judge' | 'expand' | 'combine'; reason?: string; ids?: number[] }> {
+    async autoStep(boardId: number): Promise<{ did: 'idle' | 'judge' | 'expand' | 'combine'; reason?: string; ids?: number[]; error?: { code: string; message: string } }> {
       const board = mustBoard(boardId);
       const ideas = repo.listIdeas(boardId);
       if (!ideas.length) return { did: 'idle', reason: 'empty' };
 
+      const day = localDay(new Date(now()));
+      const crewCap = deps.settings().crewCallsPerDay;
+      const crewAtCap = repo.crewCallsOn(day) >= crewCap;
+
       if (board.config.autoProjectOnGold) {
-        const pendingExists = ideas.find(
-          (i) => medal(i) === 3 && !i.projectPath && i.existsVerdict === null && i.existsAttempts < 3 && !judging.has(i.id),
-        );
-        if (pendingExists) {
-          await handleGold(board, pendingExists);
-          return { did: 'judge', ids: [pendingExists.id] };
+        const existsCrewBlocked = crewAtCap && isCrewModel(modelFor(board, 'exists'));
+        if (!existsCrewBlocked) {
+          const pendingExists = ideas.find(
+            (i) => medal(i) === 3 && !i.projectPath && i.existsVerdict === null && i.existsAttempts < 3 && !judging.has(i.id),
+          );
+          if (pendingExists) {
+            const out = await handleGold(board, pendingExists);
+            return {
+              did: 'judge',
+              ids: [pendingExists.id],
+              ...(out.projectError ? { error: { code: out.projectErrorCode ?? 'gold_failed', message: out.projectError } } : {}),
+            };
+          }
         }
-        const day = localDay(new Date(now()));
-        const briefCrewBlocked = isCrewModel(modelFor(board, 'brief')) && repo.crewCallsOn(day) >= deps.settings().crewCallsPerDay;
+        const briefCrewBlocked = crewAtCap && isCrewModel(modelFor(board, 'brief'));
         if (!briefCrewBlocked) {
           const pendingBrief = ideas.find(
-            (i) => medal(i) === 3 && !i.projectPath && (i.existsVerdict === 'partial' || i.existsVerdict === 'new') && !judging.has(i.id),
+            (i) => medal(i) === 3 && !i.projectPath && (i.existsVerdict === 'partial' || i.existsVerdict === 'new') && i.briefAttempts < 3 && !judging.has(i.id),
           );
           if (pendingBrief) {
-            await handleGold(board, pendingBrief);
-            return { did: 'judge', ids: [pendingBrief.id] };
+            const out = await handleGold(board, pendingBrief);
+            return {
+              did: 'judge',
+              ids: [pendingBrief.id],
+              ...(out.projectError ? { error: { code: out.projectErrorCode ?? 'gold_failed', message: out.projectError } } : {}),
+            };
           }
         }
       }
 
-      const judgeAll = async (ids: number[]) => {
-        const results = await Promise.allSettled(ids.map((id) => judge(id)));
-        const failed = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
-        if (failed && results.every((r) => r.status === 'rejected')) throw failed.reason;
-      };
+      const judgeIsCrew = isCrewModel(modelFor(board, 'judge'));
       const unjudged = ideas.filter((i) => !isJudged(i) && i.medalOverride == null && !judging.has(i.id)).slice(0, 3);
       if (unjudged.length) {
-        await judgeAll(unjudged.map((i) => i.id));
-        return { did: 'judge', ids: unjudged.map((i) => i.id) };
+        if (crewAtCap && judgeIsCrew) {
+          throw new AppError(429, 'crew_cap', `Daily crew limit (${crewCap}) reached; resumes tomorrow`);
+        }
+        const err = await judgeSequential(unjudged.map((i) => i.id));
+        return { did: 'judge', ids: unjudged.map((i) => i.id), ...(err ? { error: err } : {}) };
       }
       const edges = repo.listEdges(boardId);
       let move = nextMove(ideas, edges, { busy: judging });
       if (!move) return { did: 'idle', reason: 'nothing_to_do' };
 
-      const day = localDay(new Date(now()));
-      const crewAtCap = repo.crewCallsOn(day) >= deps.settings().crewCallsPerDay;
-      if (crewAtCap && move.type === 'expand' && isCrewModel(modelFor(board, 'expand')) && !isCrewModel(modelFor(board, 'combine'))) {
-        const alt = nextMove(ideas, edges, { busy: judging, mutationRate: 0 });
-        if (alt?.type === 'combine') move = alt;
+      if (crewAtCap && judgeIsCrew) {
+        throw new AppError(429, 'crew_cap', `Daily crew limit (${crewCap}) reached; resumes tomorrow`);
+      }
+      const expandIsCrew = isCrewModel(modelFor(board, 'expand'));
+      const combineIsCrew = isCrewModel(modelFor(board, 'combine'));
+      if (crewAtCap && move.type === 'expand' && expandIsCrew) {
+        if (!combineIsCrew) {
+          const alt = nextMove(ideas, edges, { busy: judging, mutationRate: 0 });
+          if (alt?.type === 'combine') move = alt;
+          else throw new AppError(429, 'crew_cap', `Daily crew limit (${crewCap}) reached; resumes tomorrow`);
+        } else {
+          throw new AppError(429, 'crew_cap', `Daily crew limit (${crewCap}) reached; resumes tomorrow`);
+        }
+      } else if (crewAtCap && move.type === 'combine' && combineIsCrew) {
+        if (!expandIsCrew) {
+          const alt = nextMove(ideas, edges, { busy: judging, mutationRate: 1 });
+          if (alt?.type === 'expand') move = alt;
+          else throw new AppError(429, 'crew_cap', `Daily crew limit (${crewCap}) reached; resumes tomorrow`);
+        } else {
+          throw new AppError(429, 'crew_cap', `Daily crew limit (${crewCap}) reached; resumes tomorrow`);
+        }
       }
 
       if (move.type === 'expand') {
         const r = await doExpand(move.idea.id);
-        await judgeAll(r.ideas.map((i) => i.id));
-        return { did: 'expand', ids: r.ideas.map((i) => i.id) };
+        const err = await judgeSequential(r.ideas.map((i) => i.id));
+        return { did: 'expand', ids: r.ideas.map((i) => i.id), ...(err ? { error: err } : {}) };
       }
       const r = await doCombine(boardId, move.a.id, move.b.id);
-      await judgeAll([r.idea.id]);
-      return { did: 'combine', ids: [r.idea.id] };
+      const err = await judgeSequential([r.idea.id]);
+      return { did: 'combine', ids: [r.idea.id], ...(err ? { error: err } : {}) };
     },
   };
 }

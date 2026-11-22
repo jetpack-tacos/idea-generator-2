@@ -114,6 +114,15 @@ const ANTHROPIC_PRICES: Record<string, [number, number]> = {
   'claude-fable-5-1': [10, 50], 'claude-opus-5-5': [4, 20], 'claude-opus-5': [5, 25], 'claude-sonnet-5-5': [2, 10],
   'claude-sonnet-5': [2, 10], 'claude-haiku-5-5': [0.1, 0.5], 'claude-haiku-4-5': [1, 5],
 };
+const ANTHROPIC_PRICE_PREFIXES = Object.entries(ANTHROPIC_PRICES).sort((a, b) => b[0].length - a[0].length);
+
+function anthropicPrice(model: string): [number, number] {
+  if (ANTHROPIC_PRICES[model]) return ANTHROPIC_PRICES[model];
+  const undated = model.replace(/-\d{8}$/, '');
+  if (ANTHROPIC_PRICES[undated]) return ANTHROPIC_PRICES[undated];
+  const prefix = ANTHROPIC_PRICE_PREFIXES.find(([k]) => model.startsWith(k));
+  return prefix ? prefix[1] : [5, 25];
+}
 
 export type ChatRequest = {
   model: string;
@@ -138,21 +147,35 @@ export type ChatAttempt = { model: string; boardId: number | null; role: Role } 
 const tokens = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : 0;
 const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
 
-const FLASH_PRICES: Record<string, [miss: number, hit: number, output: number]> = {
+const MODEL_PRICES: Record<string, [miss: number, hit: number, output: number]> = {
   'deepseek:deepseek-flash': [0.30, 0.006, 1.20],
+  'deepseek:deepseek-chat': [0.30, 0.03, 1.20],
+  'deepseek:deepseek-reasoner': [0.55, 0.14, 2.19],
   'zai:glm-5.3-flash': [0.15, 0.03, 0.50],
+  'zai:glm-5-flash': [0.15, 0.03, 0.50],
+  'openai:gpt-5.4-mini': [0.40, 0.10, 1.60],
+  'openai:gpt-5.4': [2.50, 0.625, 10.00],
+  'openai:gpt-4o-mini': [0.15, 0.075, 0.60],
+  'openai:gpt-4o': [2.50, 1.25, 10.00],
 };
+const FALLBACK_PAID_PRICE: [miss: number, hit: number, output: number] = [2.00, 0.50, 10.00];
 
 function chatUsage(provider: ApiProviderId, model: string, usage: any): Usage {
   const hits = tokens(usage?.prompt_cache_hit_tokens ?? usage?.prompt_tokens_details?.cached_tokens);
   const inputTokens = tokens(usage?.prompt_tokens) || hits + tokens(usage?.prompt_cache_miss_tokens);
   const outputTokens = tokens(usage?.completion_tokens);
-  const price = FLASH_PRICES[`${provider}:${model}`];
+  const price = MODEL_PRICES[`${provider}:${model}`];
   const cached = Math.min(inputTokens, hits);
   const reported = Number(usage?.cost);
-  const costUsd = price
-    ? ((inputTokens - cached) * price[0] + cached * price[1] + outputTokens * price[2]) / 1e6
-    : Number.isFinite(reported) && reported > 0 ? reported : 0;
+  const isFree = provider === 'openrouter' && /:free$/i.test(model);
+  let costUsd = 0;
+  if (price) {
+    costUsd = ((inputTokens - cached) * price[0] + cached * price[1] + outputTokens * price[2]) / 1e6;
+  } else if (Number.isFinite(reported) && reported > 0) {
+    costUsd = reported;
+  } else if (!isFree && (inputTokens > 0 || outputTokens > 0)) {
+    costUsd = ((inputTokens - cached) * FALLBACK_PAID_PRICE[0] + cached * FALLBACK_PAID_PRICE[1] + outputTokens * FALLBACK_PAID_PRICE[2]) / 1e6;
+  }
   return { inputTokens, outputTokens, costUsd };
 }
 export type ChatFn = (r: ChatRequest) => Promise<ChatResult>;
@@ -256,7 +279,6 @@ async function openaiChat(p: ApiProviderId, model: string, r: ChatRequest, baseU
     body.reasoning_effort = 'low';
     body.max_tokens = Math.max(body.max_tokens, 4000);
   }
-  if (p === 'deepseek') body.reasoning_effort = 'none';
   if (p === 'openrouter') {
     body.reasoning = { enabled: false };
     body.usage = { include: true };
@@ -294,6 +316,10 @@ async function openaiChat(p: ApiProviderId, model: string, r: ChatRequest, baseU
       if (body.reasoning && /reasoning/i.test(text)) {
         delete body.reasoning; // this model insists on reasoning; thinking counts against max_tokens
         body.max_tokens = Math.max(body.max_tokens * 4, 4000);
+        continue;
+      }
+      if ('reasoning_effort' in body && /reasoning/i.test(text)) {
+        delete body.reasoning_effort;
         continue;
       }
       if ('temperature' in body && /temperature/i.test(text)) { delete body.temperature; continue; }
@@ -357,7 +383,7 @@ async function anthropicChat(model: string, r: ChatRequest, record: (usage: Usag
       received = true;
       const inputTokens = msg.usage.input_tokens + (msg.usage.cache_creation_input_tokens ?? 0) + (msg.usage.cache_read_input_tokens ?? 0);
       const outputTokens = msg.usage.output_tokens;
-      const [pin, pout] = ANTHROPIC_PRICES[model] ?? [0, 0];
+      const [pin, pout] = anthropicPrice(model);
       const costUsd = (inputTokens * pin + outputTokens * pout) / 1e6;
       record({ inputTokens, outputTokens, costUsd });
       if (msg.stop_reason === 'refusal') throw new ProviderError('refused', `${model} declined to answer`);
@@ -428,6 +454,7 @@ async function crewChat(
 
       const timeoutMs = r.timeoutMs ?? opts.crewTimeoutMs ?? DEFAULT_CREW_TIMEOUT_MS;
       const timeoutMinutes = Math.max(1, Math.ceil(timeoutMs / 60_000));
+      const graceMs = timeoutMs >= 60_000 ? 15_000 : Math.min(15_000, Math.floor(timeoutMs * 0.1));
       const res = await runNoShell(
         'python',
         [
@@ -438,7 +465,7 @@ async function crewChat(
           '--effort', effort,
           '--timeout', String(timeoutMinutes),
         ],
-        timeoutMs,
+        timeoutMs + graceMs,
       );
       record(ZERO_USAGE);
 
@@ -468,7 +495,11 @@ async function crewChat(
         throw new ProviderError('provider_error', e?.message ?? String(e));
       }
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      try {
+        await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      } catch {
+        /* temp cleanup errors must not mask provider errors */
+      }
     }
   });
 }
@@ -512,7 +543,7 @@ export async function listModels(p: ApiProviderId, baseUrls: BaseUrls = {}): Pro
   const base = baseFor(p, baseUrls);
   const key = keyFor(p);
   const get = async (url: string, headers: Record<string, string> = {}) => {
-    const res = await fetch(url, { headers: { Accept: 'application/json', ...headers }, signal: AbortSignal.timeout(10_000) });
+    const res = await fetch(url, { headers: { Accept: 'application/json', ...headers }, signal: AbortSignal.timeout(10_000), redirect: 'error' });
     const text = await res.text();
     if (!res.ok) throw new ProviderError(res.status === 401 || res.status === 403 ? 'bad_key' : 'provider_error', `${res.status}: ${text.slice(0, 200)}`);
     try {

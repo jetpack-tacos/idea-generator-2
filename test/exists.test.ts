@@ -67,6 +67,7 @@ with open(${JSON.stringify(alertsFile)}, 'a', encoding='utf-8') as f:
 
     const engine = createEngine({
       repo, chat, settings, searchTransport, alertLogFile: join(dir, 'alerts.log'), gitInit: false,
+      now: () => Date.parse('2026-11-10T12:00:00'),
     });
     const board = repo.createBoard({ title: 'B' });
 
@@ -150,6 +151,87 @@ test('exists check failures retry on later rounds at most 3 times', async () => 
     assert.equal(searchAttempts, callsBefore);
     assert.equal(repo.getIdea(idea.id)!.existsAttempts, 3);
     assert.equal(existsSync(projectsRoot) ? readdirSync(projectsRoot).length : 0, 0);
+  } finally {
+    repo.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('judgeExistingTool ignores hallucinated URLs, search runs sequentially, and alerts defer outside activeHours', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ideagen-exists-hallu-'));
+  const repo = openDb(':memory:');
+  try {
+    const projectsRoot = join(dir, 'projects');
+    const alertsFile = join(dir, 'alerts.txt');
+    const alertScript = join(dir, 'alert.py');
+    writeFileSync(alertScript, `
+import sys
+with open(${JSON.stringify(alertsFile)}, 'a', encoding='utf-8') as f:
+    f.write(sys.argv[1] + '\\n')
+`, 'utf8');
+
+    let now = Date.parse('2026-11-10T22:05:00'); // outside 08:00-22:00 activeHours
+    const settings = () => ({
+      ...DEFAULT_APP_SETTINGS,
+      projectsRoot,
+      alertCommand: ['python', '-I', alertScript, '{title}'],
+      models: { ...DEFAULT_APP_SETTINGS.models, brief: 'zai:glm-5.3-flash' },
+    });
+
+    let activeSearch = 0;
+    let maxConcurrentSearch = 0;
+    const searchTransport: typeof fetch = async (input) => {
+      activeSearch++;
+      maxConcurrentSearch = Math.max(maxConcurrentSearch, activeSearch);
+      await new Promise((r) => setTimeout(r, 15));
+      activeSearch--;
+      const url = String(input);
+      if (url.includes('api.github.com')) {
+        return new Response(JSON.stringify({
+          items: [{ full_name: 'real/repo', html_url: 'https://github.com/real/repo', stargazers_count: 5, description: 'Real' }],
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ hits: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    };
+
+    const chat = async (r: ChatRequest) => {
+      if (r.schemaName === 'judgement') {
+        return { value: { reason: 'Gold!', originality: 5, feasibility: 4, impact: 4, keywords: ['tool'] }, costUsd: 0 };
+      }
+      if (r.schemaName === 'exists_queries') {
+        return { value: { queries: ['q1', 'q2'] }, costUsd: 0 };
+      }
+      if (r.schemaName === 'exists_verdict') {
+        // Model hallucinates a URL not in results and says exists
+        return { value: { verdict: 'exists', url: 'https://github.com/fake/hallucinated', reason: 'Claimed match' }, costUsd: 0 };
+      }
+      return {
+        value: {
+          name: 'Real Tool', slug: 'real-tool', oneLiner: 'L', problem: 'P', audience: 'H',
+          mvp: ['A'], outOfScope: ['B'], stack: 'Node', firstSteps: ['1'], openQuestions: ['Q'], risks: ['R'],
+        },
+        costUsd: 0,
+      };
+    };
+
+    const engine = createEngine({
+      repo, chat, settings, searchTransport, alertLogFile: join(dir, 'alerts.log'), gitInit: false, now: () => now,
+    });
+    const board = repo.createBoard({ title: 'B' });
+    const idea = repo.insertIdea({ boardId: board.id, title: 'Hallucinated Check', pitch: 'p', kind: 'seed', x: 0, y: 0, generation: 0 });
+    const res = await engine.judge(idea.id);
+
+    assert.ok(maxConcurrentSearch <= 2, 'only one query (1 GH + 1 HN) runs at a time, not all queries in parallel');
+    assert.equal(res.idea.existsUrl, null, 'hallucinated URL is stripped');
+    assert.equal(res.idea.existsVerdict, 'partial', 'unverified exists verdict is downgraded so folder is still created');
+    assert.ok(res.project && existsSync(res.project));
+    assert.equal(existsSync(alertsFile), false, 'alert must not fire outside activeHours');
+
+    // Inside activeHours next morning, deferred alert flushes
+    now = Date.parse('2026-11-11T08:05:00');
+    await engine.flushAlerts();
+    const sent = readFileSync(alertsFile, 'utf8').trim().split(/\r?\n/);
+    assert.deepEqual(sent, ['Gold idea: Hallucinated Check']);
   } finally {
     repo.close();
     rmSync(dir, { recursive: true, force: true });

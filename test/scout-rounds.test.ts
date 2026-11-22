@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../server/db.ts';
 import { createEngine } from '../server/engine.ts';
 import { DEFAULT_APP_SETTINGS, type ChatFn } from '../server/providers.ts';
+import { judgeMany } from '../server/scouts/filter.ts';
 import { createScoutScheduler } from '../server/scouts/scheduler.ts';
 import type { Find } from '../server/scouts/http.ts';
 
@@ -105,6 +106,7 @@ test('a failed Python filter falls back in batches of ten through the board rese
   const batches: number[] = [];
   const chat: ChatFn = async (req) => {
     assert.equal(req.schemaName, 'scout_fit');
+    assert.ok(!/"minimum"|"maximum"/.test(JSON.stringify(req.schema)), 'researchScores schema must omit minimum/maximum for Anthropic');
     assert.equal(req.boardId, board.id);
     assert.equal(req.model, 'deepseek:deepseek-flash');
     assert.equal(req.role, 'research');
@@ -155,4 +157,66 @@ test("a source's single best find seeds from 0.4; its others still need the thre
   repo.saveFindScores(new Map([[added[0].id, 0.45], [added[1].id, 0.44], [added[2].id, 0.3]]));
   assert.deepEqual(repo.seedableFinds(0.6, 6).map((f) => f.id), [added[0].id]);
   repo.close();
+});
+
+test('scoring never runs outside activeHours, waitIdle awaits in-flight rounds, and malformed out.jsonl lines are skipped', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ideagen-scout-edge-'));
+  const repo = openDb(':memory:');
+  try {
+    // 1) Malformed line in judge_many out.jsonl does not discard valid scores
+    const badOutJudge = join(dir, 'judge_partial.py');
+    writeFileSync(badOutJudge, `
+import argparse, json
+p = argparse.ArgumentParser()
+for f in ('--questions', '--items', '--out', '--task', '--context-file'): p.add_argument(f)
+p.add_argument('--public', action='store_true')
+a = p.parse_args()
+items = [json.loads(l) for l in open(a.items, encoding='utf-8') if l.strip()]
+with open(a.out, 'w', encoding='utf-8') as out:
+    out.write('{bad json line\\n')
+    for it in items:
+        out.write(json.dumps({'id': it['id'], 'ok': True, 'answers': {'fit': {'noul': 0.8}}}) + '\\n')
+`, 'utf8');
+    const added = repo.addFinds([draft('lobsters', 10)], start);
+    const partialScores = await judgeMany(badOutJudge, 'ctx', added);
+    assert.equal(partialScores.get(added[0].id), 0.8);
+
+    // 2) If clock crosses activeHours.end while fetching, scoring does NOT run outside activeHours; waitIdle waits for in-flight round
+    let now = new Date(2026, 10, 22, 21, 57, 0).getTime();
+    let llmCalled = false;
+    const settings = () => ({ ...DEFAULT_APP_SETTINGS, judgeManyPath: '' });
+    const engine = createEngine({
+      repo,
+      chat: async () => { llmCalled = true; throw new Error('must not score outside activeHours'); },
+      settings,
+      now: () => now,
+      gitInit: false,
+    });
+    const scout2 = createScoutScheduler({
+      repo,
+      engine,
+      settings,
+      now: () => now,
+      sources: {
+        hackernews: async () => {
+          await new Promise((r) => setTimeout(r, 40));
+          now = new Date(2026, 10, 22, 22, 0, 10).getTime(); // crossed 22:00 end during fetch
+          return [draft('hackernews', 20)];
+        },
+      },
+    });
+    scout2.start();
+    now = new Date(2026, 10, 22, 21, 59, 50).getTime();
+    const first = scout2.tick();
+    // Second tick while first is in-flight returns immediately, so waitIdle() is needed to await completion
+    await scout2.tick();
+    await scout2.waitIdle();
+    await first;
+    await scout2.stop();
+    assert.equal(llmCalled, false, 'no scoring call may run outside activeHours');
+    assert.equal(repo.latestFinds().find((f) => f.externalId === '20')?.score, null);
+  } finally {
+    repo.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
