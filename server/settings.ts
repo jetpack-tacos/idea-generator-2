@@ -82,7 +82,12 @@ export function mergeAppSettings(raw: any, base = DEFAULT_APP_SETTINGS): AppSett
       parseModel(c.models[role].trim());
       models[role] = c.models[role].trim();
     }
-    out.creditRun = { until: c.until, maxUsd: c.maxUsd, models };
+    const efforts: Record<string, 'low' | 'medium' | 'high'> = {};
+    for (const role of ROLES) {
+      const e = c.efforts?.[role];
+      if (e === 'low' || e === 'medium' || e === 'high') efforts[role] = e;
+    }
+    out.creditRun = { until: c.until, maxUsd: c.maxUsd, models, efforts };
   }
   if (raw.crewCallsPerDay !== undefined) {
     const cap = raw.crewCallsPerDay;

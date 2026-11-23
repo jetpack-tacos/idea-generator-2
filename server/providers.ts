@@ -39,7 +39,7 @@ export type AppSettings = {
    */
   claudeFallback?: { until: string; model: string; headlessPath: string };
   /** Roles sent to the Claude API credit until `until` or until `maxUsd` is spent (see makeChat). */
-  creditRun?: { until: string; maxUsd: number; models: Partial<Record<Role, string>> };
+  creditRun?: { until: string; maxUsd: number; models: Partial<Record<Role, string>>; efforts?: Partial<Record<Role, 'low' | 'medium' | 'high'>> };
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -146,6 +146,8 @@ export type ChatRequest = {
   temperature: number;
   maxTokens?: number;
   timeoutMs?: number;
+  /** Anthropic effort; default low (short single-shot answers). The credit run's judge uses medium. */
+  effort?: 'low' | 'medium' | 'high';
   onUsage?: (usage: Usage) => void;
   boardId?: number;
   role?: Role;
@@ -385,13 +387,13 @@ async function anthropicChat(model: string, r: ChatRequest, record: (usage: Usag
   const client = anthropicClient(key);
   // Structured output via output_config.format. No temperature: current models reject
   // non-default sampling. Low effort: these are short, single-shot answers.
-  const output_config: any = { format: { type: 'json_schema', schema: r.schema }, effort: 'low' };
+  const output_config: any = { format: { type: 'json_schema', schema: r.schema }, effort: r.effort ?? 'low' };
   for (let attempt = 0; attempt < 2; attempt++) {
     let received = false;
     try {
       const msg = await client.messages.create({
         model,
-        max_tokens: Math.max(r.maxTokens ?? 1200, 4000),
+        max_tokens: Math.max(r.maxTokens ?? 1200, (r.effort ?? 'low') === 'low' ? 4000 : 12000),
         system: r.system,
         messages: [{ role: 'user', content: r.user }],
         output_config,
@@ -559,7 +561,7 @@ export function makeChat({
     const creditModel = r.role ? credit?.models?.[r.role] : undefined;
     if (!creditModel || creditEmpty || !creditRunOn(credit, now(), creditSpent)) return one(r);
     try {
-      return await one({ ...r, model: creditModel }, (u) => {
+      return await one({ ...r, model: creditModel, effort: credit?.efforts?.[r.role!] ?? r.effort }, (u) => {
         creditSpent += u.costUsd;
         if (creditLedger) appendLedger(creditLedger, { time: new Date(now()).toISOString(), model: creditModel, role: r.role!, ...u });
         return { ...u, costUsd: 0 };
