@@ -56,7 +56,7 @@ test('CLAUDE.md: verdict, goal, numbered steps, and source lineage', () => {
     brief, idea, goal: 'Ljud', date: '2026-11-02',
     lineage: [{ ...idea, id: 2, title: 'Source seed', pitch: 'Source pitch', kind: 'seed', sourceUrl: 'https://example.com/source' }],
   });
-  assert.match(md, /Use 5 · Buildable 4 · Fit 4 = 13\/15 🥇/);
+  assert.match(md, /New 5 · Buildable 4 · Worth having 4 = 13\/15 🥇/);
   assert.match(md, /## Board goal\n\nLjud/);
   assert.match(md, /1\. f1\n2\. f2/);
   assert.ok(md.includes("- Seed: **Source seed** Source pitch (source: https://example.com/source)"));
@@ -77,7 +77,7 @@ test('gold project files, literal Windows-safe paths and no overwrites', async (
   assert.equal(readFileSync(join(b, 'JER-ASKED.md'), 'utf8'),
     `# Bänk\n\nRuns on: not decided yet\nNo requests yet: this idea came from the idea generator on ${localDay()}, board "TEST board".\n`);
   const notes = readFileSync(join(b, 'NOTES.md'), 'utf8');
-  assert.match(notes, /Gold 🥇\nUse 5\/5 · Buildable 4\/5 · Fit 4\/5 \(13\/15\)\nBra\./);
+  assert.match(notes, /Gold 🥇\nNew 5\/5 · Buildable 4\/5 · Worth having 4\/5 \(13\/15\)\nBra\./);
   assert.ok(notes.includes('https://example.com/seed'));
   const ordinary = await writeProject({ ...input, brief: { ...brief, slug: 'con' }, idea: { ...idea, impact: 1 } });
   assert.equal(ordinary.slice(root.length + 1), 'idea-con');

@@ -62,7 +62,7 @@ function send(res: ServerResponse, status: number, body: unknown, type = 'applic
 
 const LABELS = {
   flow: 'Flow', ideas: 'ideas', exported: 'Exported', seed: 'Seed', source: 'Source', parents: 'Parents',
-  originality: 'Use', feasibility: 'Buildable', impact: 'Fit', unjudged: 'Not judged',
+  originality: 'New', feasibility: 'Buildable', impact: 'Worth having', unjudged: 'Not judged',
   handset: 'set by hand', project: 'Claude Code project', alreadyExists: 'Already exists',
   summary: 'Summary', strongest: 'Strongest', gaps: 'Gaps', next: 'Next steps', stale: 'The summary is older than the board',
 };
@@ -117,7 +117,7 @@ export function boardMarkdown(board: Board, ideas: Idea[], edges: { from: number
 }
 
 const reportScores = (i: { sum: number | null; originality: number | null; feasibility: number | null; impact: number | null }) =>
-  i.sum == null ? '' : ` · Use ${i.originality} · Buildable ${i.feasibility} · Fit ${i.impact}`;
+  i.sum == null ? '' : ` · New ${i.originality} · Buildable ${i.feasibility} · Worth having ${i.impact}`;
 
 const REPORT_LABELS = {
   title: 'Report', period: 'Last {n} days', boards: 'boards', ideas: 'ideas', newIdeas: 'new', projects: 'Claude Code projects',

@@ -4,6 +4,7 @@ import type { Engine } from '../engine.ts';
 import type { AppSettings } from '../providers.ts';
 import { judgeMany } from './filter.ts';
 import type { Scout } from './http.ts';
+import { fetchReadme, seedPitch } from './readme.ts';
 import { fetchSessionWishes, type SessionFind } from './sessions.ts';
 import { scouts, type PublicScoutSource, type ScoutSource } from './sources.ts';
 
@@ -18,8 +19,11 @@ export function createScoutScheduler(deps: {
   sources?: Partial<Record<PublicScoutSource, Scout>>;
   sessionsScout?: () => Promise<SessionFind[]>;
   log?: (message: string) => void;
+  /** README text for a repo URL; '' when none. Tests pass a stub. */
+  readme?: (url: string) => Promise<string>;
 }) {
   const { repo, engine } = deps;
+  const readmeOf = deps.readme ?? ((url: string) => fetchReadme(url));
   const now = deps.now ?? Date.now;
   const log = deps.log ?? console.log;
   const sources = Object.entries(deps.sources ?? scouts) as [PublicScoutSource, Scout][];
@@ -115,7 +119,10 @@ export function createScoutScheduler(deps: {
       for (const b of repo.listBoards()) {
         if (b.config.mode !== 'auto') continue;
         for (const find of repo.seedableFinds(settings.seedThreshold, settings.seedsPerRound)) {
-          engine.seedFind(b.id, find.id, {}, false);
+          // A repo seed carries its README text, so the idea writer knows what the project really does.
+          const readme = find.source.startsWith('github') ? await readmeOf(find.url) : '';
+          if (repo.getFind(find.id)?.seededIdeaId != null) continue; // seeded by hand while the README loaded
+          engine.seedFind(b.id, find.id, {}, false, readme ? seedPitch(find.summary, readme) : undefined);
         }
       }
     }

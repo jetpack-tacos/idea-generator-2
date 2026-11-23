@@ -33,7 +33,7 @@ async function load() {
 
 const startCmd = (path) => `cd "${path}" && claude`;
 
-const scores = (idea) => idea.sum == null ? '' : `Use ${idea.originality} · Buildable ${idea.feasibility} · Fit ${idea.impact}`;
+const scores = (idea) => idea.sum == null ? '' : `New ${idea.originality} · Buildable ${idea.feasibility} · Worth having ${idea.impact}`;
 
 function ideaLine(i, boardTitle) {
   return h('button', { class: 'rank-item', onclick: () => { close(); S.onOpenIdea?.(i.boardId, i.id); } },

@@ -112,7 +112,7 @@ for (const [label, rows] of [['WEAK', weak], ['STRONG', strong]] as const) {
     const spread = Math.max(...r.sums) - Math.min(...r.sums);
     console.log(
       `  ${r.sums.map((s) => String(s).padStart(2)).join(' ')}  ${r.sums.map((s) => MEDAL[medalFromSum(s)!]).join('')}  ` +
-        `spread ${spread}  Use ${j.originality} Buildable ${j.feasibility} Fit ${j.impact}  ${r.title}`,
+        `spread ${spread}  New ${j.originality} Buildable ${j.feasibility} Worth ${j.impact}  ${r.title}`,
     );
   }
 }

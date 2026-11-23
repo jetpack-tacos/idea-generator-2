@@ -26,7 +26,7 @@ const LABELS = {
   generation: 'generation {n}',
   notJudged: 'Not judged yet',
   judging: 'The jury is reading …',
-  originality: 'Use', feasibility: 'Buildable', impact: 'Fit',
+  originality: 'New', feasibility: 'Buildable', impact: 'Worth having',
   expand: 'Branch out', expandHint: 'Three new ideas growing out of this one',
   combineWith: 'Cross with …', combinePick: 'Click the idea to cross with (Esc cancels). You can also drag one idea onto another.',
   rejudge: 'Judge again',

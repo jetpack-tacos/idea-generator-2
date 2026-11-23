@@ -138,9 +138,9 @@ test('full loop: seed → background judge → expand → combine → export', a
   assert.equal(s.title, 'Lånecyklar');
   await engine.idle();
   assert.equal(calls.length, before + 1, 'a short seed needs no LLM call, only the judge');
-  assert.match(lastCall('judgement').system, /USE .*\nWould someone in the household use it every week\?/);
+  assert.match(lastCall('judgement').system, /NEW .*\nIs the combination genuinely new/);
   assert.match(lastCall('judgement').system, /BUILDABLE[\s\S]*?one or two sessions/);
-  assert.match(lastCall('judgement').system, /FIT[\s\S]*?Android phones, Google Home/);
+  assert.match(lastCall('judgement').system, /WORTH HAVING[\s\S]*?FITS[\s\S]*?never lower a score/);
   assert.match(lastCall('judgement').user, /Färre bilresor i staden/, 'the judge sees the goal');
   const judged = repo.getIdea(s.id)!;
   assert.equal(judged.originality, 3);
@@ -167,7 +167,7 @@ test('full loop: seed → background judge → expand → combine → export', a
   assert.match(md, /^# New board/);
   assert.match(md, /> Färre bilresor i staden/);
   assert.match(md, /## 🥉 Korsning — 10\/15/, '10/15 is bronze');
-  assert.match(md, /Use 5 · Buildable 1 · Fit 4/);
+  assert.match(md, /New 5 · Buildable 1 · Worth having 4/);
   assert.match(md, /`public space` `sound`/);
   assert.ok(repo.spentOn(board.id) > 0, 'spend lands on the board');
   judgeScores = { originality: 3, feasibility: 3, impact: 3 };
@@ -418,7 +418,7 @@ test('report: totals, every project, per-board insights, saved conclusions, Mark
   const { data: md } = await api('GET', '/api/report.md?days=30');
   assert.match(md, /^# Report · \d{4}-\d{2}-\d{2}/);
   assert.match(md, /## Conclusions/);
-  assert.match(md, /Use 5 · Buildable 4 · Fit 5/);
+  assert.match(md, /New 5 · Buildable 4 · Worth having 5/);
   assert.match(md, /cd ".*sjungande-bank" && claude/);
 });
 

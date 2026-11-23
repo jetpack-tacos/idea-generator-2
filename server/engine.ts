@@ -756,10 +756,10 @@ export function createEngine(deps: Deps) {
       return call(board?.id ?? 0, 'research', (_llm, chat) => researchScores(chat, model, context, finds));
     },
 
-    seedFind(boardId: number, id: number, at: { x?: number; y?: number }, manual = true) {
+    seedFind(boardId: number, id: number, at: { x?: number; y?: number }, manual = true, pitch?: string) {
       mustBoard(boardId);
       if (!repo.getFind(id)) throw new AppError(404, 'not_found', 'Find not found');
-      const result = repo.seedFind(boardId, id, seedPosition(boardId, at));
+      const result = repo.seedFind(boardId, id, seedPosition(boardId, at), pitch);
       if (!result) throw new AppError(409, 'already_seeded', 'This find has already been seeded');
       emitIdeas(boardId, [result.idea]);
       if (manual) {

@@ -44,7 +44,7 @@ test('unattended rounds gate fetches, isolate failures, use one free batch and s
   const logs: string[] = [];
   const scheduler = () => {
     const engine = createEngine({ repo, chat, settings, gitInit: false });
-    return { engine, scout: createScoutScheduler({ repo, engine, settings, now: () => now, sources, log: (line) => logs.push(line) }) };
+    return { engine, scout: createScoutScheduler({ readme: async () => '', repo, engine, settings, now: () => now, sources, log: (line) => logs.push(line) }) };
   };
   let { engine, scout } = scheduler();
   t.after(async () => {
@@ -117,7 +117,7 @@ test('a failed Python filter falls back in batches of ten through the board rese
   };
   const logs: string[] = [];
   const engine = createEngine({ repo, chat, settings });
-  const scout = createScoutScheduler({ repo, engine, settings, now: () => now, log: (line) => logs.push(line),
+  const scout = createScoutScheduler({ readme: async () => '', repo, engine, settings, now: () => now, log: (line) => logs.push(line),
     sources: { hackernews: async () => Array.from({ length: 21 }, (_, i) => draft('hackernews', i)) } });
   t.after(async () => { await scout.stop(); repo.close(); });
   scout.start();
@@ -193,6 +193,7 @@ with open(a.out, 'w', encoding='utf-8') as out:
       gitInit: false,
     });
     const scout2 = createScoutScheduler({
+      readme: async () => '',
       repo,
       engine,
       settings,

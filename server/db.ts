@@ -718,12 +718,13 @@ export function openDb(file: string) {
         ORDER BY rank_in_source, score DESC, id LIMIT ?
       `).all(Math.min(threshold, SOURCE_BEST_FLOOR), threshold, count).map(findFromRow);
     },
-    seedFind(boardId: number, id: number, at: { x: number; y: number }) {
+    /** pitch: a richer description than the find's summary (a repo's README text), when one was fetched. */
+    seedFind(boardId: number, id: number, at: { x: number; y: number }, pitch?: string) {
       return tx(() => {
         const find = repo.getFind(id);
         if (!find || find.seededIdeaId !== null) return null;
         const idea = insertIdeaRow({
-          boardId, title: find.title, pitch: find.summary.slice(0, 600), kind: 'seed',
+          boardId, title: find.title, pitch: (pitch || find.summary).slice(0, 1600), kind: 'seed',
           sourceUrl: find.url || null, seedSource: find.source, generation: 0, ...at,
         }, []);
         db.prepare('UPDATE finds SET seeded_idea_id = ? WHERE id = ?').run(idea.id, id);

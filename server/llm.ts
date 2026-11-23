@@ -72,18 +72,19 @@ const JUDGE_SCHEMA = {
   properties: {
     reason: {
       type: 'string',
-      description: 'One sentence, at most 25 words, in the language of the idea, explaining Use, Buildable and Fit.',
+      description: 'One sentence, at most 25 words, in the language of the idea, explaining New, Buildable and Worth having.',
     },
-    originality: { type: 'integer', description: 'Use, integer 1–5.' },
+    originality: { type: 'integer', description: 'New, integer 1–5.' },
     feasibility: { type: 'integer', description: 'Buildable, integer 1–5.' },
-    impact: { type: 'integer', description: 'Fit, integer 1–5.' },
+    impact: { type: 'integer', description: 'Worth having, integer 1–5.' },
+    fits: { type: 'boolean', description: "True only if the idea clearly uses or serves something on the owner's interests list." },
     keywords: {
       type: 'array',
       description: '2–4 keywords for what the idea is about: English, lowercase, singular, 1–2 words each. Reuse a keyword from the vocabulary when one fits.',
       items: { type: 'string' },
     },
   },
-  required: ['reason', 'originality', 'feasibility', 'impact', 'keywords'],
+  required: ['reason', 'originality', 'feasibility', 'impact', 'fits', 'keywords'],
   additionalProperties: false,
 };
 
@@ -92,9 +93,11 @@ const JUDGE_SCHEMA = {
 const LANGUAGE_RULE = 'Write in the language of the source ideas or seed text. If unclear or mixed, write in English.';
 
 
+// The owner's interests steer the search but never limit an idea (owner's choice, 2026-11-22: a great
+// idea is one they would use anyway). Do not assume devices the list does not name.
 function householdText(board: BoardCtx) {
   const h = board.household?.trim();
-  return h ? `The household these ideas are for (only assume devices, hobbies and routines named here):
+  return h ? `The owner's interests and gear (a plus when an idea touches them, never a requirement; do not assume devices that are not named here):
 ${h}` : '';
 }
 
@@ -141,21 +144,29 @@ function context(board: BoardCtx, existingTitles: string[]) {
 
 const fmtIdea = (i: Pitch) => (i.pitch ? `${i.title}: ${i.pitch}` : i.title);
 
-export const JUDGE_SYSTEM = `You are a strict household jury. Judge the idea as written, without inventing missing details. Use integers 1–5 on these three criteria. Most ideas land around 2–3. Fewer than one in ten should score 13 or higher.
+export const JUDGE_SYSTEM = `You are a strict jury for new things to build. Judge the idea as written, without inventing missing details. Use integers 1–5 on these three criteria. Most ideas land around 2–3. Fewer than one in ten should score 13 or higher.
 
-USE (return under originality)
-Would someone in the household use it every week?
-1: Nobody would use it. 3: Useful now and then for one person. 5: Several household members would use it weekly.
+NEW (return under originality)
+Is the combination genuinely new, something that does not already exist and that neither ingredient does alone?
+1: Already exists or is an obvious mash-up. 3: A fresh twist on a known kind of thing. 5: A combination nobody has made that opens something new.
 
 BUILDABLE (return under feasibility)
-Could coding agents build a first working version in one or two sessions on a Windows PC with phones and smart-home devices nearby?
+Could coding agents build a first working version in one or two sessions on a Windows PC with phones and common hardware nearby?
 1: Requires research breakthroughs or major hardware. 3: A multi-week project. 5: One or two agent sessions.
 
-FIT (return under impact)
-Does it use what the household already has: a Windows PC, Android phones, Google Home, an old tablet used as a family calendar, Claude Code and other coding agents?
-1: Needs a whole new setup. 3: Needs one new device or service. 5: Uses only what is already there.
+WORTH HAVING (return under impact)
+Would a thoughtful, tech-minded person really want this and keep using it once it exists?
+1: A curiosity nobody would keep. 3: Handy now and then. 5: People would want it and use it often.
 
-A bare topic or single word is not an idea. Give it Use 1 and at most 2 on Buildable and Fit. If the idea is vague about what happens, score Buildable and Fit at most 2. Judge against the board goal. If the idea does not serve the goal, cap Fit at 2 and explain why. Explain the three scores in one concise sentence, with the main strength and weakness.`;
+FITS (return under fits)
+True only if the idea clearly uses or serves something on the owner's interests list. It is a small bonus, so never lower a score because an idea does not fit.
+
+A bare topic or single word is not an idea. Give it New 1 and at most 2 on Buildable and Worth having. If the idea is vague about what happens, score Buildable and Worth having at most 2. Explain the three scores in one concise sentence, with the main strength and weakness.`;
+
+/** Fitting the owner's interests adds one point to Worth having, never above 5: a bonus, never a gate. */
+export function withFitBonus(worthHaving: number, fits: unknown) {
+  return fits === true ? Math.min(5, worthHaving + 1) : worthHaving;
+}
 
 
 const list = (description: string) => ({ type: 'array', description, items: { type: 'string' } });
@@ -286,7 +297,7 @@ export function makeLLM(chat: ChatFn) {
         .join('\n\n');
       const { value, costUsd } = await chat({
         model: a.model,
-        system: 'You are an inventive cross-pollinator who finds unexpected, practical mechanisms connecting disparate tools, papers, and household needs.',
+        system: 'You are an inventive cross-pollinator who finds unexpected, practical mechanisms connecting disparate tools, papers and real needs.',
         user,
         schemaName: 'deep_cross',
         schema: DEEP_CROSS_SCHEMA,
@@ -447,7 +458,7 @@ export function makeLLM(chat: ChatFn) {
       const judgement: Judgement = {
         originality: clampScore(value?.originality),
         feasibility: clampScore(value?.feasibility),
-        impact: clampScore(value?.impact),
+        impact: withFitBonus(clampScore(value?.impact), value?.fits),
         reason: String(value?.reason ?? '').trim().slice(0, 400),
         keywords: normalizeKeywords(value?.keywords),
       };

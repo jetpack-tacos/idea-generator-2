@@ -92,7 +92,7 @@ export async function writeBrief(a: {
     'Turn this idea into a kickoff brief for a coding agent (Claude Code) that will build it from an empty folder.',
     `The idea:\n${fmt(a.idea)}`,
     a.goal.trim() ? `The goal of the board it came from: ${a.goal.trim()}` : '',
-    sum != null ? `Jury verdict: Use ${a.idea.originality}, Buildable ${a.idea.feasibility}, Fit ${a.idea.impact} (of 5). ${a.idea.reason ?? ''}` : '',
+    sum != null ? `Jury verdict: New ${a.idea.originality}, Buildable ${a.idea.feasibility}, Worth having ${a.idea.impact} (of 5). ${a.idea.reason ?? ''}` : '',
     a.lineage.length ? `It grew out of these ideas:\n${a.lineage.map((i) => `- ${fmt(i)}`).join('\n')}` : '',
     'Write in the language of the idea, or English if unclear. The slug is always ASCII.',
   ]
@@ -128,7 +128,7 @@ export async function writeBrief(a: {
 
 const LABELS = {
   born: 'This project was born on an idea board in Idea Generator', brief: 'This file is the brief: read it before you start, and keep it up to date as decisions are made.',
-  idea: 'The idea', goal: 'Board goal', verdict: 'Jury verdict', o: 'Use', f: 'Buildable', i: 'Fit', handset: 'Medal set by hand',
+  idea: 'The idea', goal: 'Board goal', verdict: 'Jury verdict', o: 'New', f: 'Buildable', i: 'Worth having', handset: 'Medal set by hand',
   problem: 'Problem', audience: 'Who it is for', mvp: 'MVP: the smallest build that tests the core', out: 'Out of scope for now', stack: 'Suggested stack',
   steps: 'First steps', questions: 'Open questions', risks: 'Risks', origin: 'Where the idea came from', source: 'source',
   kinds: { seed: 'Seed', expand: 'Branch', combine: 'Cross' } as Record<string, string>,
@@ -229,7 +229,7 @@ export async function writeProject(a: {
     ].join('\n'));
     const sum = scoreSum(a.idea);
     const scores = sum == null ? 'No jury scores yet.' :
-      `Use ${a.idea.originality}/5 · Buildable ${a.idea.feasibility}/5 · Fit ${a.idea.impact}/5 (${sum}/15)`;
+      `New ${a.idea.originality}/5 · Buildable ${a.idea.feasibility}/5 · Worth having ${a.idea.impact}/5 (${sum}/15)`;
     const sources = [a.idea, ...a.lineage];
     const ex = a.exists ?? (a.idea.existsVerdict ? { verdict: a.idea.existsVerdict, url: a.idea.existsUrl, reason: a.idea.existsReason } : null);
     const existsLines = ex
