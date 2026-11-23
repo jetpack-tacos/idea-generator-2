@@ -13,6 +13,15 @@ test('overusedWords names words that keep coming back, not plain or rare ones', 
   assert.deepEqual(overusedWords(titles.slice(0, 3)), [], 'fewer than 4 uses is not overuse');
 });
 
+test('overusedWords catches three-letter themes like NFC (fresh board, 2026-11-22)', () => {
+  const fresh = [
+    'NFC Media Drive Sorter', 'NFC Desk Sentry Toggle', 'Telegram Safe Video Archiver', 'NFC Shell Posture Cards',
+    'Command-Not-Found Concierge', 'NFC Prompt Envelope Binder', 'NFC Decision Memory Router', 'Decision-Sealed NFC Envelopes',
+    'The App for All of You', 'The App for One', 'The App for Two', 'The App for Any',
+  ];
+  assert.deepEqual(overusedWords(fresh), ['nfc'], 'NFC is named; everyday short words are not');
+});
+
 test('expand and combine prompts tell the writer which themes are worn out', async () => {
   const prompts: string[] = [];
   const llm = makeLLM(async ({ user }: any) => {

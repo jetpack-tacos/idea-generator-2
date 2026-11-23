@@ -101,16 +101,20 @@ function householdText(board: BoardCtx) {
 ${h}` : '';
 }
 
-const PLAIN_WORDS = new Set(['household', 'with', 'from', 'that', 'this', 'your', 'into', 'idea', 'ideas', 'home', 'family']);
+const PLAIN_WORDS = new Set([
+  'household', 'with', 'from', 'that', 'this', 'your', 'into', 'idea', 'ideas', 'home', 'family',
+  'the', 'and', 'for', 'via', 'you', 'new', 'one', 'all', 'any', 'out', 'own', 'its', 'per', 'two', 'use', 'app', 'not', 'can',
+]);
 
 /**
  * Words that keep coming back in the board's titles. Seen 2026-11-22: "rounds" in 10 of 50 titles,
- * "autopsy" in 6, because each new idea borrowed the theme its parent had borrowed.
+ * "autopsy" in 6, because each new idea borrowed the theme its parent had borrowed. Three-letter
+ * words count too: after the fresh start "NFC" was in 6 of the first 8 titles and went unnoticed.
  */
 export function overusedWords(titles: string[], max = 10): string[] {
   const counts = new Map<string, number>();
   for (const title of titles) {
-    for (const word of new Set(title.toLowerCase().match(/[a-z]{4,}/g) ?? [])) {
+    for (const word of new Set(title.toLowerCase().match(/[a-z]{3,}/g) ?? [])) {
       if (!PLAIN_WORDS.has(word)) counts.set(word, (counts.get(word) ?? 0) + 1);
     }
   }
