@@ -37,3 +37,12 @@ test('expand and combine prompts tell the writer which themes are worn out', asy
   await llm.expand({ model: 'm', flow, board, idea: { title: 'X', pitch: '' }, existingTitles: ['One idea'] });
   assert.doesNotMatch(prompts[0], /worn out/);
 });
+
+test('overusedWords looks only at the newest titles, so a new theme is named early on a big board', () => {
+  const old = Array.from({ length: 500 }, (_, i) => `Old Idea Number ${i} Alpha${i}`);
+  // A word of its own for each filler title: digits spelled as letters (3 -> "ddd"), so no filler word repeats.
+  const own = (i: number) => String(i + 100).replace(/\d/g, (d) => 'abcdefghij'[Number(d)].repeat(3));
+  const recent = Array.from({ length: 60 }, (_, i) => (i % 10 === 0 ? `Promise Census ${i}` : own(i)));
+  assert.deepEqual(overusedWords([...old, ...recent]), ['census', 'promise'], '6 of the last 60 is worn out');
+  assert.ok(!overusedWords([...old, ...recent]).includes('old'), 'old themes no longer count once they stop');
+});

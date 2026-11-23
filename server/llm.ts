@@ -110,8 +110,12 @@ const PLAIN_WORDS = new Set([
  * Words that keep coming back in the board's titles. Seen 2026-11-22: "rounds" in 10 of 50 titles,
  * "autopsy" in 6, because each new idea borrowed the theme its parent had borrowed. Three-letter
  * words count too: after the fresh start "NFC" was in 6 of the first 8 titles and went unnoticed.
+ * Only the newest 60 titles count (Jer 2026-11-23 12:22 AM: "yes, fix the theme check"): across all 540
+ * titles a new theme needed about 44 uses before it was named, so "promise" and "census" spread unchecked.
  */
-export function overusedWords(titles: string[], max = 10): string[] {
+export const RECENT_TITLES = 60;
+export function overusedWords(allTitles: string[], max = 10): string[] {
+  const titles = allTitles.slice(-RECENT_TITLES);
   const counts = new Map<string, number>();
   for (const title of titles) {
     for (const word of new Set(title.toLowerCase().match(/[a-z]{3,}/g) ?? [])) {
