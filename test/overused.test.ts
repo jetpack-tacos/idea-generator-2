@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeLLM, overusedWords } from '../server/llm.ts';
+import { makeLLM, overusedKeywords, overusedWords } from '../server/llm.ts';
 
 const titles = [
   'Grand Rounds Autopsy', 'Night-Shift Rounds Handoff', 'Receipt Delta Grand Rounds', 'OpenVINO Photo Rounds',
@@ -45,4 +45,13 @@ test('overusedWords looks only at the newest titles, so a new theme is named ear
   const recent = Array.from({ length: 60 }, (_, i) => (i % 10 === 0 ? `Promise Census ${i}` : own(i)));
   assert.deepEqual(overusedWords([...old, ...recent]), ['census', 'promise'], '6 of the last 60 is worn out');
   assert.ok(!overusedWords([...old, ...recent]).includes('old'), 'old themes no longer count once they stop');
+});
+
+test('overusedKeywords names a method that fills the pitches but not the titles', () => {
+  const lists = [
+    ...Array.from({ length: 40 }, (_, n) => [`old${n % 3}`]),
+    ...Array.from({ length: 60 }, (_, n) => (n % 7 === 0 ? ['capture-recapture', `t${n}`] : [`t${n}`])),
+  ];
+  assert.deepEqual(overusedKeywords(lists), ['capture-recapture'], '9 of the last 60 is worn out; older ideas do not count');
+  assert.deepEqual(overusedKeywords(lists.slice(0, 3)), [], 'fewer than 4 uses is not overuse');
 });

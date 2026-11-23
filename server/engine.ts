@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { activeHoursUntil } from './autopilot.ts';
 import { localDay, type Repo, type Idea, type Board, type StoredFind } from './db.ts';
-import { makeLLM } from './llm.ts';
+import { makeLLM, overusedKeywords } from './llm.ts';
 import { asUrl, fetchPage as realFetchPage } from './extract.ts';
 import { fetchPapers as realFetchPapers, researchLeads, xLeads } from './leads.ts';
 import { writeBrief, writeProject } from './project.ts';
@@ -176,7 +176,12 @@ export function createEngine(deps: Deps) {
   };
   const modelFor = (board: Board, role: Role) => board.config.models[role] || deps.settings().models[role];
   /** The board plus the owner's household description, for idea prompts and the jury. */
-  const withHousehold = (board: Board) => ({ ...board, household: deps.settings().interests ?? '' });
+  // wornKeywords: the keywords overused in the newest ideas, named as worn-out themes in the writing prompts.
+  const withHousehold = (board: Board) => ({
+    ...board,
+    household: deps.settings().interests ?? '',
+    wornKeywords: overusedKeywords(repo.listIdeas(board.id).sort((a, b) => a.id - b.id).map((i) => i.keywords ?? [])),
+  });
   const titles = (boardId: number) => repo.listIdeas(boardId).map((i) => i.title);
   const emitIdeas = (boardId: number, ideas: Idea[]) => ideas.length && bus.emit(boardId, { type: 'ideas', ideas });
   const seedPosition = (boardId: number, at: { x?: number; y?: number }) =>

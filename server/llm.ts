@@ -11,7 +11,7 @@ export type { ChatFn, ChatRequest } from './providers.ts';
 type Pitch = { title: string; pitch: string };
 type Flow = { system: string; expand: string; combine: string };
 /** household: the owner's description of the household (from settings.interests), shared with every idea prompt and the jury. */
-type BoardCtx = { goal: string; household?: string };
+type BoardCtx = { goal: string; household?: string; wornKeywords?: string[] };
 export type Judgement = { originality: number; feasibility: number; impact: number; reason: string; keywords: string[] };
 
 /** One canonical form so "Public Spaces" and "public space" count as one trend. */
@@ -127,6 +127,20 @@ export function overusedWords(allTitles: string[], max = 10): string[] {
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, max).map(([word]) => word);
 }
 
+/**
+ * Keywords that keep coming back in the newest ideas (Jer 2026-11-23 12:42 PM: "fix the capture-recapture overuse
+ * too"). capture-recapture was a keyword on 23% of new ideas but in 1 of the last 60 titles, so the title check
+ * never named it: a borrowed method lives in the pitch, not the title. Takes each idea's keyword list, oldest first.
+ */
+export function overusedKeywords(keywordLists: string[][], max = 8): string[] {
+  const recent = keywordLists.slice(-RECENT_TITLES);
+  const counts = new Map<string, number>();
+  for (const list of recent) for (const k of new Set(list)) counts.set(k, (counts.get(k) ?? 0) + 1);
+  const floor = Math.max(4, Math.ceil(recent.length * 0.1));
+  return [...counts].filter(([, n]) => n >= floor)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, max).map(([k]) => k);
+}
+
 // A field to borrow from, different on every call, so ideas do not keep circling one motif (audit 2026-11-23 #20).
 export const LENS_FIELDS = [
   'logistics and shipping', 'ecology and field biology', 'aviation safety', 'music production', 'cooking and kitchens',
@@ -156,7 +170,7 @@ function context(board: BoardCtx, existingTitles: string[]) {
         .map((t) => `- ${t}`)
         .join('\n')}`,
     );
-  const overused = overusedWords(existingTitles);
+  const overused = [...new Set([...overusedWords(existingTitles), ...(board.wornKeywords ?? [])])];
   if (overused.length)
     parts.push(
       `Themes already worn out on this board: ${overused.join(', ')}. Do not use these words in the title, and do not borrow a metaphor or field the board has already used (for example hospital rounds or autopsies when "rounds" or "autopsy" is listed). If you borrow a mechanism, take it from a field none of these ideas came from.`,
