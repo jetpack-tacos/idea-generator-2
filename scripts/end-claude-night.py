@@ -12,7 +12,7 @@ data = json.loads(path.read_text(encoding='utf-8'))
 saved = data.pop('modelsBeforeTonight', None)
 if saved:
     data['models'] = saved
-    data['activeHours'] = {'start': data.get('activeHours', {}).get('start', '08:00'), 'end': '22:00'}
+    data['activeHours'] = {'start': '08:00', 'end': '22:00'}
     data.pop('claudeFallback', None)
     path.write_text(json.dumps(data, indent=2), encoding='utf-8')
     print(f'restored {len(saved)} models, day ends 22:00, Claude fallback off')
