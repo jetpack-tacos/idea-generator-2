@@ -89,7 +89,8 @@ export function createScoutScheduler(deps: {
 
     const boards = repo.listBoards();
     const board = boards.find((b) => b.config.mode === 'auto') ?? boards[0];
-    const context = [board?.goal ? `Board goal: ${board.goal}` : '', settings.interests].filter(Boolean).join('\n\n');
+    // The board goal only: the interests list pulled every find's score toward the owner's gear (audit 2026-11-23 #12).
+    const context = board?.goal ? `Board goal: ${board.goal}` : '';
     if (finds.length && settings.judgeManyPath && activeHoursUntil(now(), deps.settings().activeHours) === null) {
       log(`[scouts] judge_many filter for ${finds.length} new finds`);
       try {

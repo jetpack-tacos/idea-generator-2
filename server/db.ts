@@ -146,7 +146,7 @@ export const DEFAULT_TEMPLATES = [
     system:
       'You are a brilliant, practical inventor. You think in mechanisms: what exactly happens, for whom, and why it works. You avoid buzzwords.',
     expand:
-      'Generate 3 new ideas that grow out of the concept. Make them clearly different from each other: one close variation that sharpens it, one that borrows a mechanism from a completely different field, and one bold leap.',
+      'Generate 3 new ideas that grow out of the concept. Make them clearly different from each other: one sharper, more specific version that could stand on its own, one that borrows a mechanism from a completely different field, and one bold leap.',
     combine:
       'Fuse the two ideas into ONE new concept that neither could be alone. Name the specific mechanism that connects them; do not just list both.',
   },
@@ -155,7 +155,7 @@ export const DEFAULT_TEMPLATES = [
     system:
       'You are a systems thinker working on sustainability and local communities. You favour solutions that cut resource use and that ordinary people and municipalities can start with today.',
     expand:
-      'Generate 3 ideas that grow out of the concept and make it more sustainable socially, ecologically or practically. Make them differ in scale: household, organisation, and region.',
+      'Generate 3 ideas that grow out of the concept and make it more sustainable socially, ecologically or practically. Make them differ in scale: individual, organisation, and region.',
     combine:
       'Combine the two ideas into ONE solution where the sustainability gain of one multiplies the other. Be concrete about what changes.',
   },

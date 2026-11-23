@@ -42,8 +42,15 @@ export function medal(idea) {
 // A hand-set medal counts as a typical sum for that medal when breeding.
 const OVERRIDE_FITNESS = [6, 10, 12, 14];
 
+// A raw find (a seed) is judged like a finished idea and scores about 6.5 against about 10 for bred ideas, so
+// tournaments stopped picking finds and the board bred from its own children (audit 2026-11-23 #3: 957 of 982).
+// For breeding a seed counts at least as much as a typical bred idea; its shown score and medal are unchanged.
+export const SEED_FITNESS = 10;
+
 /** What evolution selects on. null = not part of the population yet. */
 export function fitness(idea) {
   if (Number.isInteger(idea?.medalOverride)) return OVERRIDE_FITNESS[idea.medalOverride];
-  return scoreSum(idea);
+  const sum = scoreSum(idea);
+  if (sum != null && idea.kind === 'seed' && !idea.generation) return Math.max(sum, SEED_FITNESS);
+  return sum;
 }

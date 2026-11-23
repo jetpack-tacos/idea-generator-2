@@ -65,8 +65,8 @@ function lineageSources(ideas, edges) {
       if (visited.has(parentId)) continue;
       visited.add(parentId);
       const ancestor = byId.get(parentId);
-      if (ancestor?.kind === 'seed' && ancestor.generation === 0 && ancestor.seedSource) {
-        sources.add(ancestor.seedSource);
+      if (ancestor?.kind === 'seed' && ancestor.generation === 0) {
+        sources.add(ancestor.seedSource || 'manual'); // a hand-made seed is a source of its own (audit #22)
       }
       for (const parent of parents.get(parentId) ?? []) stack.push(parent);
     }
@@ -88,7 +88,7 @@ function crossesSources(a, b) {
  * @returns {{type:'combine', a, b} | {type:'expand', idea} | null}
  */
 export function nextMove(ideas, edges, opts = {}) {
-  const { rng = Math.random, busy = new Set(), inFlight = new Set(), mutationRate = 0.2, k = 3 } = opts;
+  const { rng = Math.random, busy = new Set(), inFlight = new Set(), mutationRate = 0.2, k = 3, freshRate = 0.3 } = opts;
   const pool = population(ideas).filter((i) => !busy.has(i.id));
   const expanded = expandedIds(ideas, edges);
   const used = usedPairs(ideas, edges);
@@ -99,6 +99,20 @@ export function nextMove(ideas, edges, opts = {}) {
   if (pool.length < 3 || rng() < mutationRate) {
     const idea = bestUnexpanded();
     if (idea) return { type: 'expand', idea };
+  }
+
+  // Fresh material (audit 2026-11-23 #4): now and then cross a strong idea with a seed that has never been a parent,
+  // so new finds keep entering the board instead of the pool breeding only from itself.
+  const parented = new Set(edges.map((e) => e.from));
+  const fresh = pool.filter((i) => i.kind === 'seed' && !i.generation && !parented.has(i.id));
+  const bred = pool.filter((i) => i.kind !== 'seed');
+  if (fresh.length && bred.length && rng() < freshRate) {
+    {
+      const a = tournament(bred, k, rng);
+      const b = fresh[Math.floor(rng() * fresh.length)];
+      const key = pairKey(a.id, b.id);
+      if (!used.has(key) && !inFlight.has(key)) return { type: 'combine', a, b };
+    }
   }
 
   if (pool.length >= 2) {

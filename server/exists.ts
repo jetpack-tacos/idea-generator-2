@@ -151,7 +151,8 @@ export async function searchExistingTools(
     }
   }
 
-  if (!ghSuccess || !hnSuccess) {
+  // One side answering is enough (audit 2026-11-23 #5): a GitHub rate limit used to stall a gold idea for good.
+  if (!ghSuccess && !hnSuccess) {
     throw new Error(`Search incomplete (GitHub ${ghSuccess}/${queries.length}, HN ${hnSuccess}/${queries.length}): ${(lastErr as any)?.message ?? lastErr ?? 'failed'}`);
   }
   return [...seen.values()];
@@ -175,12 +176,12 @@ export async function judgeExistingTool(a: {
     `Idea:\n${a.idea.title}${a.idea.pitch ? `: ${a.idea.pitch}` : ''}`,
     a.goal.trim() ? `Board goal: ${a.goal.trim()}` : '',
     `Search results from GitHub and Hacker News:\n${list}`,
-    'Decide if this tool already exists ("exists"), partially exists or needs clear adaptation ("partial"), or is meaningfully new ("new").',
+    'This board crosses ideas, so judge the whole combination, not one ingredient. Answer "exists" only when one existing project already does the whole idea as described. If projects cover only some of its parts, or do something close but not the combination, answer "partial". If nothing covers the combination, answer "new".',
   ].filter(Boolean).join('\n\n');
 
   const { value, costUsd } = await a.chat({
     model: a.model,
-    system: 'You compare a proposed software idea against GitHub and Hacker News search results and judge whether it already exists. Be conservative: only mark "exists" when an existing project clearly solves the same problem.',
+    system: 'You compare a proposed software idea against GitHub and Hacker News search results and judge whether it already exists. Be conservative: only mark "exists" when one existing project clearly does the whole combined idea; an existing ingredient is not the idea.',
     user,
     schemaName: 'exists_verdict',
     schema: VERDICT_SCHEMA,

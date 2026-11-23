@@ -9,10 +9,12 @@ const FIT = {
   type: 'noul',
   // Reworded 2026-11-22 (part 3): the old "for their own household or hobby" question pulled every seed back to home gadgets
   // (Jer 7:05 PM: "This sounds like a real flaw to fix"). Interests are a plus, never a gate (Jer 7:11 PM).
-  instructions: 'Is this a useful spark for building something new and worth having, on its own or crossed with ideas from other fields? Fitting the interests described in the context is a plus, never a requirement.',
+  // Asked as an ingredient, not a finished idea (audit 2026-11-23 #10): at 0.6 the old question let through 44 of 347
+  // Google News finds and 2 of 27 Lobsters stories, so the board crossed mostly GitHub and papers.
+  instructions: 'Could this be a raw ingredient for something new and worth building, on its own or crossed with an idea from a completely different field? A tool, a technique, a discovery, a trend, a problem people have or a product launch all count.',
   criteria: {
     true_description: 'It points to a tool, technique, device, dataset or discovery, or reports a problem, trend or situation, that suggests something worth building.',
-    false_description: 'Politics, markets, sports results, celebrity, crime or disaster news, or a product announcement, with nothing in it to build on.',
+    false_description: 'Politics, market moves, sports results, celebrity, crime or disaster news with nothing in it to build on.',
   },
 };
 

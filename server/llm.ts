@@ -4,7 +4,7 @@
 // Schemas avoid integer minimum/maximum (Anthropic rejects them), so ranges
 // live in descriptions and are clamped in code.
 
-import { clampScore } from '../public/js/score.js';
+import { MEDAL_MIN_SUM, clampScore } from '../public/js/score.js';
 import type { ChatFn } from './providers.ts';
 export type { ChatFn, ChatRequest } from './providers.ts';
 
@@ -30,7 +30,7 @@ const PITCH_PROPS = {
   title: { type: 'string', description: 'A concrete name for the idea, 2–6 words. No quotes, no trailing period.' },
   pitch: {
     type: 'string',
-    description: 'One or two sentences, at most 40 words: what it is, for whom, and the mechanism that makes it work.',
+    description: 'Two or three sentences, at most 70 words: what it is, for whom, and what actually happens step by step that makes it work.',
   },
 };
 const PITCH_SCHEMA = { type: 'object', properties: PITCH_PROPS, required: ['title', 'pitch'], additionalProperties: false };
@@ -127,18 +127,32 @@ export function overusedWords(allTitles: string[], max = 10): string[] {
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, max).map(([word]) => word);
 }
 
+// A field to borrow from, different on every call, so ideas do not keep circling one motif (audit 2026-11-23 #20).
+export const LENS_FIELDS = [
+  'logistics and shipping', 'ecology and field biology', 'aviation safety', 'music production', 'cooking and kitchens',
+  'library science', 'sports coaching', 'manufacturing quality control', 'game design', 'medicine and triage',
+  'urban planning', 'textiles and sewing', 'typography and printing', 'banking and accounting', 'theatre and stagecraft',
+  'astronomy', 'woodworking', 'journalism and editing', 'retail and shop floors', 'weather forecasting',
+  'education and tutoring', 'cartography', 'photography', 'gardening', 'law and contracts', 'radio and broadcasting',
+  'insurance and risk', 'archaeology', 'fashion', 'railways', 'beekeeping', 'film editing', 'chess', 'brewing',
+];
+export function lensLine(random = Math.random) {
+  return `If you borrow a mechanism from another field, this time consider ${LENS_FIELDS[Math.floor(random() * LENS_FIELDS.length)]} (only if it fits; never force it).`;
+}
+
 function context(board: BoardCtx, existingTitles: string[]) {
+  // The owner's interests list goes only to the jury (for the small fit bonus). In every writing prompt it read as
+  // the target and pulled ideas back to his gear (audit 2026-11-23 #7: the NFC and home-automation pull).
   const parts: string[] = [];
-  const household = householdText(board);
-  if (household) parts.push(household);
   if (board.goal.trim())
     parts.push(
-      `The board's goal (the general direction): ${board.goal.trim()}\nEvery idea must serve this goal. Keep the source idea's substance, but steer it toward the goal.`,
+      // Upstream said "Every idea must serve this goal ... steer it toward the goal" (audit #6).
+      `The board's goal (a direction, not a filter): ${board.goal.trim()}\nKeep the source ideas' substance. An idea that goes beyond the goal is fine if it is great.`,
     );
   if (existingTitles.length)
     parts.push(
       `Ideas already on the board (do not repeat or lightly reword them):\n${existingTitles
-        .slice(-40)
+        .slice(-80)
         .map((t) => `- ${t}`)
         .join('\n')}`,
     );
@@ -164,7 +178,7 @@ Is the combination genuinely new, something that does not already exist and that
 
 BUILDABLE (return under feasibility)
 Could coding agents build a first working version in one or two sessions on a Windows PC with phones and common hardware nearby?
-1: Requires research breakthroughs or major hardware. 2: Months of work or special equipment. 3: A multi-week project. 4: A few agent sessions. 5: One or two agent sessions.
+1: Requires research breakthroughs or major hardware. 2: Months of work or special equipment. 3: A few weeks of work. 4: About a week of agent sessions. 5: A working first version in a few agent sessions.
 
 WORTH HAVING (return under impact)
 Would a thoughtful, tech-minded person really want this and keep using it once it exists?
@@ -173,11 +187,14 @@ Would a thoughtful, tech-minded person really want this and keep using it once i
 FITS (return under fits)
 True only if the idea clearly uses or serves something on the owner's interests list. It is a small bonus, so never lower a score because an idea does not fit.
 
-A bare topic or single word is not an idea. Give it New 1 and at most 2 on Buildable and Worth having. If the idea is vague about what happens, score Buildable and Worth having at most 2. Explain the three scores in one concise sentence, with the main strength and weakness.`;
+A bare topic or single word is not an idea. Give it New 1 and at most 2 on Buildable and Worth having. If the idea never says what actually happens, score Buildable and Worth having at most 2; a short pitch that does say it is not vague. Explain the three scores in one concise sentence, with the main strength and weakness.`;
 
 /** Fitting the owner's interests adds one point to Worth having, never above 5: a bonus, never a gate. */
-export function withFitBonus(worthHaving: number, fits: unknown) {
-  return fits === true ? Math.min(5, worthHaving + 1) : worthHaving;
+// Gold is earned on merit: the bonus never lifts a total to the gold line (audit 2026-11-23 #2: the one point was
+// exactly the gap between silver 12 and gold 13, so fitting ideas got gold and equally good others did not).
+export function withFitBonus(worthHaving: number, fits: unknown, otherTwo = 0) {
+  if (fits !== true || worthHaving >= 5) return worthHaving;
+  return otherTwo + worthHaving + 1 >= MEDAL_MIN_SUM[3] ? worthHaving : worthHaving + 1;
 }
 
 
@@ -263,6 +280,7 @@ export function makeLLM(chat: ChatFn) {
         a.flow.expand,
         `The concept:\n${fmtIdea(a.idea)}`,
         context(a.board, a.existingTitles),
+        lensLine(),
         LANGUAGE_RULE,
       ]
         .filter(Boolean)
@@ -279,6 +297,7 @@ export function makeLLM(chat: ChatFn) {
         `Idea 1:\n${fmtIdea(a.a)}`,
         `Idea 2:\n${fmtIdea(a.b)}`,
         context(a.board, a.existingTitles),
+        lensLine(),
         LANGUAGE_RULE,
       ]
         .filter(Boolean)
@@ -314,7 +333,7 @@ export function makeLLM(chat: ChatFn) {
         schemaName: 'deep_cross',
         schema: DEEP_CROSS_SCHEMA,
         temperature: 0.9,
-        maxTokens: 2000,
+        maxTokens: 6000, // 2000 was tight for three ideas with parent ids (audit #16)
       });
       const validIds = new Set(a.candidates.map((c) => c.id));
       const byTitle = new Map(a.candidates.map((c) => [c.title.toLowerCase(), c.id]));
@@ -470,7 +489,7 @@ export function makeLLM(chat: ChatFn) {
       const judgement: Judgement = {
         originality: clampScore(value?.originality),
         feasibility: clampScore(value?.feasibility),
-        impact: withFitBonus(clampScore(value?.impact), value?.fits),
+        impact: withFitBonus(clampScore(value?.impact), value?.fits, clampScore(value?.originality) + clampScore(value?.feasibility)),
         reason: String(value?.reason ?? '').trim().slice(0, 400),
         keywords: normalizeKeywords(value?.keywords),
       };

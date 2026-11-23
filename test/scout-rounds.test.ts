@@ -98,10 +98,10 @@ test('unattended rounds gate fetches, isolate failures, use one free batch and s
 
 test('a failed Python filter falls back in batches of ten through the board research model', async (t) => {
   const repo = openDb(':memory:');
-  const board = repo.createBoard({ title: 'TEST fallback', goal: 'TEST goal', config: { mode: 'auto', models: { research: 'deepseek:deepseek-flash' } } });
+  const board = repo.createBoard({ title: 'TEST fallback', goal: 'TEST goal TEST force failure', config: { mode: 'auto', models: { research: 'deepseek:deepseek-flash' } } });
   let now = start;
   const settings = () => ({
-    ...DEFAULT_APP_SETTINGS, judgeManyPath: python, interests: 'TEST interests TEST force failure',
+    ...DEFAULT_APP_SETTINGS, judgeManyPath: python, interests: 'TEST interests',
   });
   const batches: number[] = [];
   const chat: ChatFn = async (req) => {
@@ -111,7 +111,8 @@ test('a failed Python filter falls back in batches of ten through the board rese
     assert.equal(req.model, 'deepseek:deepseek-flash');
     assert.equal(req.role, 'research');
     const { context, items } = JSON.parse(req.user);
-    assert.match(context, /TEST goal[\s\S]+TEST interests/);
+    assert.match(context, /TEST goal/);
+    assert.doesNotMatch(context, /TEST interests/, 'the filter sees the board goal only (2026-11-23)');
     batches.push(items.length);
     return { costUsd: 0.01, value: { scores: items.map(({ id }: { id: string }) => ({ id, fit: 0.35 })) } };
   };

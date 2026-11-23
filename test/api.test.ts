@@ -150,7 +150,7 @@ test('full loop: seed → background judge → expand → combine → export', a
   assert.equal(e.ideas.length, 3);
   assert.match(e.ideas[0].title, /^Barn \d+\.1$/, 'quotes and trailing period are stripped');
   assert.match(lastCall('expand').user, /language of the source ideas or seed text/);
-  assert.match(lastCall('expand').user, /Every idea must serve this goal/);
+  assert.match(lastCall('expand').user, /a direction, not a filter/);
   assert.match(lastCall('expand').user, /- Lånecyklar/, 'existing titles reach the prompt');
   await engine.idle();
   assert.ok(e.ideas.every((i: any) => repo.getIdea(i.id)!.judgedAt), 'children are judged in the background');

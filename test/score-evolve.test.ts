@@ -151,7 +151,7 @@ test('evolution stats leave seeds out and compare first and latest windows', () 
   assert.equal(evolutionStats(ideas.slice(0, 5)).latest, null, 'no "latest" until there is more than one window');
 });
 
-test('idea prompts and the jury carry the household description', async () => {
+test('the jury sees the owner\'s interests; the idea writer does not (2026-11-23 audit #7)', async () => {
   const { openDb } = await import('../server/db.ts');
   const { createEngine } = await import('../server/engine.ts');
   const { DEFAULT_APP_SETTINGS } = await import('../server/providers.ts');
@@ -170,6 +170,16 @@ test('idea prompts and the jury carry the household description', async () => {
   await engine.judge(seed.id);
   await engine.autoStep(board.id);
   assert.match(seen.judgement, /TEST HOUSEHOLD: no 3D printer\./);
-  assert.match(seen.expand, /TEST HOUSEHOLD: no 3D printer\./);
+  assert.doesNotMatch(seen.expand, /TEST HOUSEHOLD: no 3D printer\./);
   repo.close();
+});
+
+test('fresh material: a never-used seed is crossed with a bred idea now and then (2026-11-23 audit #4)', () => {
+  const seed = (id: number, sum: number) => idea(id, sum, { kind: 'seed', generation: 0, seedSource: 'papers' });
+  const ideas = [seed(1, 6), seed(2, 6), idea(3, 12, { kind: 'combine', generation: 1 }), idea(4, 11, { kind: 'combine', generation: 1 })];
+  const edges = [{ from: 1, to: 3 }, { from: 1, to: 4 }];
+  const move = nextMove(ideas, edges, { rng: () => 0.1, mutationRate: 0 }) as any;
+  assert.equal(move.type, 'combine');
+  assert.equal(move.b.id, 2, 'the seed that was never a parent');
+  assert.notEqual(move.a.kind, 'seed');
 });

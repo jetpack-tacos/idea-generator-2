@@ -12,7 +12,7 @@ assert sys.flags.isolated and args.public and args.task == "idea-generator filte
 question = json.loads(Path(args.questions).read_text(encoding="utf-8"))["fit"]
 assert question["type"] == "noul" and set(question["criteria"]) == {"true_description", "false_description"}
 context = Path(args.context_file).read_text(encoding="utf-8")
-assert "TEST goal" in context and "TEST interests" in context
+assert "TEST goal" in context and "TEST interests" not in context  # goal only since 2026-11-23
 if "TEST force failure" in context:
     sys.exit(3)
 
