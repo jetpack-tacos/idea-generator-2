@@ -14,5 +14,6 @@ sources.local.json
 reference.local.json
 settings.local.json.*.tmp
 logs/spend.jsonl
+logs/credit.jsonl
 logs/alerts.log
 logs/server.log*
