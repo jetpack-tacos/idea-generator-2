@@ -10,6 +10,8 @@ import { scouts, type PublicScoutSource, type ScoutSource } from './sources.ts';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
+/** The six-month look-back runs once ever (a claim this long never comes due again). */
+const LOOKBACK_EVER = 100 * 365 * DAY;
 
 export function createScoutScheduler(deps: {
   repo: Repo;
@@ -21,13 +23,16 @@ export function createScoutScheduler(deps: {
   log?: (message: string) => void;
   /** README text for a repo URL; '' when none. Tests pass a stub. */
   readme?: (url: string) => Promise<string>;
+  /** The one-time look-back; off unless given (the server passes the real one). */
+  lookback?: Scout | null;
 }) {
   const { repo, engine } = deps;
   const readmeOf = deps.readme ?? ((url: string) => fetchReadme(url));
   const now = deps.now ?? Date.now;
   const log = deps.log ?? console.log;
   const sources = Object.entries(deps.sources ?? scouts) as [PublicScoutSource, Scout][];
-  const busy = new Set<ScoutSource>();
+  const lookback = deps.lookback ?? null;
+  const busy = new Set<ScoutSource | 'lookback'>();
   const pending = new Set<Promise<void>>();
   let readyAt = Infinity;
   let nextCleanup = 0;
@@ -42,6 +47,7 @@ export function createScoutScheduler(deps: {
       } catch (error: any) {
         const msg = error?.message ?? String(error);
         repo.recordScoutError(source, msg, now());
+        if ((source as string) === 'lookback') repo.retryScoutAt(source, now() - LOOKBACK_EVER + HOUR);
         log(`[scouts] ${source} failed, retry on its next round: ${msg}`);
         return [];
       }
@@ -143,6 +149,10 @@ export function createScoutScheduler(deps: {
     void engine.flushAlerts?.();
     const due = sources.filter(([source]) => !busy.has(source) &&
       repo.claimScout(source, time, settings.scoutIntervalsHours[source] * HOUR));
+    if (lookback && !busy.has('lookback') && repo.claimScout('lookback', time, LOOKBACK_EVER)) {
+      log('[scouts] six-month look-back started (runs once)');
+      due.push(['lookback' as PublicScoutSource, lookback]);
+    }
     const sessionsEnabled = Boolean(deps.sessionsScout || (settings.sessionsPath && settings.judgeManyPath));
     const runSessions = sessionsEnabled && !busy.has('sessions') &&
       repo.claimScout('sessions', time, (settings.scoutIntervalsHours.sessions ?? 12) * HOUR);

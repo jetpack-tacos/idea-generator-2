@@ -218,6 +218,8 @@ export function createAutopilot(deps: { repo: Repo; engine: Engine; settings: ()
         } else {
           st.errors++;
           st.lastErrorAt = st.lastAt = curTime;
+          // The page shows only "Error, retrying"; the log keeps the reason (2026-11-22, part 3).
+          console.log(`[autopilot] board ${b.id} step failed (${code}): ${String(message).slice(0, 300)}`);
           publish(b.id, st, {
             state: 'error', code, message,
             until: curTime + backoffMs(st.errors), ...freshCounts(st),

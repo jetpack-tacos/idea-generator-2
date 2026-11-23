@@ -7,9 +7,11 @@ import type { ChatFn } from '../providers.ts';
 
 const FIT = {
   type: 'noul',
-  instructions: 'Would someone with the interests described in the context find this a useful spark for a project they could build for their own household or hobby?',
+  // Reworded 2026-11-22 (part 3): the old "for their own household or hobby" question pulled every seed back to home gadgets
+  // (Jer 7:05 PM: "This sounds like a real flaw to fix"). Interests are a plus, never a gate (Jer 7:11 PM).
+  instructions: 'Is this a useful spark for building something new and worth having, on its own or crossed with ideas from other fields? Fitting the interests described in the context is a plus, never a requirement.',
   criteria: {
-    true_description: 'It points to a tool, technique, device, dataset or discovery, or reports a problem, trend or situation, that suggests something useful to build at home or for a hobby listed in the context.',
+    true_description: 'It points to a tool, technique, device, dataset or discovery, or reports a problem, trend or situation, that suggests something worth building.',
     false_description: 'Politics, markets, sports results, celebrity, crime or disaster news, or a product announcement, with nothing in it to build on.',
   },
 };

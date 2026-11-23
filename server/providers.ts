@@ -7,7 +7,7 @@ import { runNoShell } from './alert.ts';
 import type { ScoutSource } from './scouts/sources.ts';
 
 export type ApiProviderId = 'openrouter' | 'anthropic' | 'openai' | 'deepseek' | 'zai';
-export type ProviderId = ApiProviderId | 'crew';
+export type ProviderId = ApiProviderId | 'crew' | 'claude';
 export type CrewWorker = 'neon' | 'hydrogen';
 export type CrewEffort = 'low' | 'medium' | 'high' | 'xhigh';
 export type Role = 'distill' | 'expand' | 'combine' | 'judge' | 'summary' | 'research' | 'x' | 'brief' | 'deep' | 'exists';
@@ -31,6 +31,12 @@ export type AppSettings = {
   interests: string;
   seedThreshold: number;
   seedsPerRound: number;
+  /**
+   * Until this moment (ISO time), a call that fails because an outside model ran out of quota is asked again on
+   * Jer's Claude plan through `claude -p` (Jer 2026-11-22 10:13 PM: "use my claude quota tonight until midnight for
+   * any task where we are using outside tools if they run out of quota"). Empty or past means off.
+   */
+  claudeFallback?: { until: string; model: string; headlessPath: string };
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -75,6 +81,8 @@ export function parseModel(ref: string): { provider: ProviderId; model: string }
     const { worker, effort } = parseCrewModel(rest);
     return { provider: 'crew', model: `${worker}:${effort}` };
   }
+  // Jer's Claude plan through `claude -p` (no dollar cost), e.g. claude:sonnet.
+  if (head === 'claude' && /^[a-z0-9.-]+$/.test(ref.slice(i + 1))) return { provider: 'claude', model: ref.slice(i + 1) };
   // Bare OpenRouter model slugs can have tags such as vendor/model:free.
   if (Object.hasOwn(PROVIDERS, head) && ref.slice(i + 1)) return { provider: head as ApiProviderId, model: ref.slice(i + 1) };
   if (ref && (i < 0 || ref.slice(0, i).includes('/'))) return { provider: 'openrouter', model: ref };
@@ -515,7 +523,16 @@ export function makeChat({
   crewPath,
   crewTimeoutMs,
   beforeCrew,
+  now = Date.now,
+  onFallback,
+  claudePlan,
+  openai,
 }: {
+  /** Tests: the clock, a stand-in for the Claude plan and for the API call. */
+  now?: () => number;
+  onFallback?: (model: string, reason: string) => void;
+  claudePlan?: (r: ChatRequest, fallback: NonNullable<AppSettings['claudeFallback']>) => Promise<ChatResult>;
+  openai?: typeof openaiChat;
   baseUrls?: BaseUrls;
   log?: (attempt: ChatAttempt) => void;
   settings?: () => AppSettings;
@@ -532,13 +549,62 @@ export function makeChat({
       r.onUsage?.(usage);
       if (r.role) log?.({ model: `${provider}:${model}`, boardId: r.boardId ?? null, role: r.role, ...usage });
     };
-    const out = provider === 'crew'
-      ? await crewChat(model, r, { crewPath: resolveCrewPath, crewTimeoutMs, beforeCrew }, record)
-      : provider === 'anthropic'
-        ? await anthropicChat(model, r, record)
-        : await openaiChat(provider, model, r, baseUrls, record);
+    let out: ChatResult;
+    try {
+      out = provider === 'claude'
+        ? await (claudePlan ?? claudePlanChat)(r, { until: '', headlessPath: settings?.().claudeFallback?.headlessPath ?? '', model })
+        : provider === 'crew'
+        ? await crewChat(model, r, { crewPath: resolveCrewPath, crewTimeoutMs, beforeCrew }, record)
+        : provider === 'anthropic'
+          ? await anthropicChat(model, r, record)
+          : await (openai ?? openaiChat)(provider, model, r, baseUrls, record);
+    } catch (error) {
+      const fallback = settings?.().claudeFallback;
+      if (provider === 'anthropic' || provider === 'claude' || !claudeFallbackOn(fallback, now()) || !isOutOfQuota(error)) throw error;
+      onFallback?.(`${provider}:${model}`, (error as any)?.message ?? String(error));
+      out = await (claudePlan ?? claudePlanChat)(r, fallback!);
+      if (r.role) log?.({ model: `claude-plan:${fallback!.model || 'sonnet'}`, boardId: r.boardId ?? null, role: r.role, ...ZERO_USAGE });
+    }
     return { ...out, costUsd };
   };
+}
+
+/** Is the fallback to the Claude plan switched on at this moment? */
+export function claudeFallbackOn(fallback: AppSettings['claudeFallback'], time: number) {
+  const until = fallback?.until ? Date.parse(fallback.until) : NaN;
+  return Boolean(fallback?.headlessPath) && Number.isFinite(until) && time < until;
+}
+
+/** Did the call fail because the outside model ran out of quota or credit (not a bad answer or a bad key)? */
+export function isOutOfQuota(error: unknown) {
+  const code = (error as any)?.code;
+  if (code === 'crew_cap' || code === 'crew_signin') return true;
+  const message = String((error as any)?.message ?? error);
+  return /\b(402|429)\b|quota|insufficient|balance|rate.?limit|usage limit|limit (reached|exceeded)|exhausted|too many requests/i.test(message);
+}
+
+/** One answer from Jer's Claude plan: `claude -p` with no tools, through his headless wrapper (it loads his saved sign-in). */
+async function claudePlanChat(r: ChatRequest, fallback: NonNullable<AppSettings['claudeFallback']>): Promise<ChatResult> {
+  const system = `${r.system}
+
+Reply with ONLY one JSON object matching this JSON schema (${r.schemaName}):
+${JSON.stringify(r.schema)}`;
+  const res = await runNoShell('python', [
+    '-I', fallback.headlessPath, '--cwd', tmpdir(), '--',
+    '-p', '--model', fallback.model || 'sonnet', '--no-session-persistence', '--tools', '', '--strict-mcp-config',
+    '--setting-sources', '', '--output-format', 'json', '--system-prompt', system, r.user,
+  ], r.timeoutMs ?? 300_000);
+  const detail = (res.stderr || res.stdout || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  if (res.killed) throw new ProviderError('provider_error', 'Claude plan timed out');
+  if (res.error || res.code !== 0) throw new ProviderError('provider_error', `Claude plan failed: ${res.error?.message ?? detail}`);
+  let reply: any;
+  try { reply = JSON.parse(res.stdout.slice(res.stdout.indexOf('{'))); } catch { throw new ProviderError('provider_error', `Claude plan: unreadable reply ${detail}`); }
+  if (reply?.is_error) throw new ProviderError('provider_error', `Claude plan: ${String(reply.result).slice(0, 300)}`);
+  try {
+    return { value: extractLastJson(String(reply.result ?? '')), costUsd: 0 };
+  } catch (e: any) {
+    throw new ProviderError('provider_error', `Claude plan: ${e?.message ?? e}`);
+  }
 }
 
 /** List a provider's models, also used as a connection test. */

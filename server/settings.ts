@@ -61,6 +61,15 @@ export function mergeAppSettings(raw: any, base = DEFAULT_APP_SETTINGS): AppSett
       out[key] = raw[key].trim();
     }
   }
+  if (raw.claudeFallback !== undefined) {
+    const f = raw.claudeFallback ?? {};
+    const headlessPath = typeof f.headlessPath === 'string' ? f.headlessPath.trim() : '';
+    if (typeof f.until !== 'string' || (f.until && !Number.isFinite(Date.parse(f.until))) ||
+      (headlessPath && !isLocalAbsolute(headlessPath)) || (f.model !== undefined && !/^[a-z0-9.-]*$/.test(String(f.model)))) {
+      throw new Error('claudeFallback needs until (ISO time or empty), model and an absolute headlessPath');
+    }
+    out.claudeFallback = { until: f.until, model: String(f.model ?? 'sonnet'), headlessPath };
+  }
   if (raw.crewCallsPerDay !== undefined) {
     const cap = raw.crewCallsPerDay;
     if (!Number.isSafeInteger(cap) || cap < 0 || cap > 10000) {

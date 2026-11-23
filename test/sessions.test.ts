@@ -9,6 +9,9 @@ import { DEFAULT_APP_SETTINGS } from '../server/providers.ts';
 import { createScoutScheduler } from '../server/scouts/scheduler.ts';
 import { MAX_ITEMS_PER_ROUND, extractUserMessageText, fetchSessionWishes } from '../server/scouts/sessions.ts';
 
+// Rounds stop outside active hours and this test reads the real clock, so it must not fail at night (seen 2026-11-22 10:20 PM).
+const ALL_DAY = { start: '00:00', end: '23:59' };
+
 test('sessions scout skips app-written text and helper threads, and caps each round at the newest messages', async () => {
   const typed = (text: string, extra: object = {}) => ({ type: 'user', entrypoint: 'claude-desktop', message: { role: 'user', content: text }, ...extra });
   assert.equal(extractUserMessageText(typed('I wish the dishwasher told me when it finished.')), 'I wish the dishwasher told me when it finished.');
@@ -140,14 +143,14 @@ with open(out_path, 'w', encoding='utf-8') as out:
     const engine = createEngine({
       repo,
       chat: async () => { llmCalled = true; throw new Error('must not call LLM'); },
-      settings: () => ({ ...DEFAULT_APP_SETTINGS, sessionsPath: sessionsDir, judgeManyPath: join(dir, 'missing.py') }),
+      settings: () => ({ ...DEFAULT_APP_SETTINGS, activeHours: ALL_DAY, sessionsPath: sessionsDir, judgeManyPath: join(dir, 'missing.py') }),
       now: () => now,
       gitInit: false,
     });
     const scheduler = createScoutScheduler({
       repo,
       engine,
-      settings: () => ({ ...DEFAULT_APP_SETTINGS, sessionsPath: sessionsDir, judgeManyPath: join(dir, 'missing.py') }),
+      settings: () => ({ ...DEFAULT_APP_SETTINGS, activeHours: ALL_DAY, sessionsPath: sessionsDir, judgeManyPath: join(dir, 'missing.py') }),
       sources: {},
       now: () => now,
     });
@@ -165,14 +168,14 @@ with open(out_path, 'w', encoding='utf-8') as out:
     const engineOk = createEngine({
       repo,
       chat: async () => { llmCalled = true; throw new Error('must not call LLM'); },
-      settings: () => ({ ...DEFAULT_APP_SETTINGS, sessionsPath: sessionsDir, judgeManyPath: judgeScript }),
+      settings: () => ({ ...DEFAULT_APP_SETTINGS, activeHours: ALL_DAY, sessionsPath: sessionsDir, judgeManyPath: judgeScript }),
       now: () => t,
       gitInit: false,
     });
     const schedulerOk = createScoutScheduler({
       repo,
       engine: engineOk,
-      settings: () => ({ ...DEFAULT_APP_SETTINGS, sessionsPath: sessionsDir, judgeManyPath: judgeScript }),
+      settings: () => ({ ...DEFAULT_APP_SETTINGS, activeHours: ALL_DAY, sessionsPath: sessionsDir, judgeManyPath: judgeScript }),
       sources: {},
       now: () => t,
     });
@@ -191,7 +194,7 @@ with open(out_path, 'w', encoding='utf-8') as out:
     const schedulerDedupe = createScoutScheduler({
       repo,
       engine: engineOk,
-      settings: () => ({ ...DEFAULT_APP_SETTINGS, sessionsPath: sessionsDir, judgeManyPath: judgeScript }),
+      settings: () => ({ ...DEFAULT_APP_SETTINGS, activeHours: ALL_DAY, sessionsPath: sessionsDir, judgeManyPath: judgeScript }),
       sources: {},
       sessionsScout: undefined,
       now: () => t,

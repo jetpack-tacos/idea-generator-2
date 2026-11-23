@@ -5,6 +5,7 @@ import { openDb } from './db.ts';
 import { makeChat } from './providers.ts';
 import { createEngine } from './engine.ts';
 import { createAutopilot } from './autopilot.ts';
+import { fetch as lookbackScout } from './scouts/lookback.ts';
 import { createScoutScheduler } from './scouts/scheduler.ts';
 import { createHandler } from './app.ts';
 import { openSettings } from './settings.ts';
@@ -45,12 +46,16 @@ export function startServer({
   const runtime = openSettings(settingsFile);
   if (dbFile !== ':memory:') mkdirSync(dirname(dbFile), { recursive: true });
   const repo = openDb(dbFile);
-  const chat = makeChat({ baseUrls, log: spendLogger(spendFile), settings: runtime.get, crewTimeoutMs });
+  const chat = makeChat({
+    baseUrls, log: spendLogger(spendFile), settings: runtime.get, crewTimeoutMs,
+    onFallback: (model, reason) => console.log(`[claude-plan] ${model} out of quota, asked Claude instead: ${reason.slice(0, 160)}`),
+  });
   const engine = createEngine({
     repo, chat, settings: runtime.get, now, searchTransport, alertLogFile, gitInit,
   });
   const autopilot = createAutopilot({ repo, engine, settings: runtime.get, now, tickMs: autopilotTickMs });
-  const scoutScheduler = createScoutScheduler({ repo, engine, settings: runtime.get, now, sources: scoutSources, sessionsScout });
+  const scoutScheduler = createScoutScheduler({ repo, engine, settings: runtime.get, now, sources: scoutSources, sessionsScout,
+    lookback: scoutSources ? null : lookbackScout });
   const server = createServer(createHandler({ repo, engine, autopilot, runtime, publicDir: join(root, 'public'), now }));
   server.once('listening', () => {
     autopilot.start();

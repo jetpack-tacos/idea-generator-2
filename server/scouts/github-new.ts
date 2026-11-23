@@ -24,7 +24,7 @@ async function keywordSearches(configPath: string): Promise<string[]> {
     .map((term) => term.trim()).slice(0, MAX_KEYWORD_SEARCHES);
 }
 
-function toFinds(data: { items?: Repository[] }): Find[] {
+export function toFinds(data: { items?: Repository[] }): Find[] {
   if (!Array.isArray(data?.items)) throw new Error('GitHub returned invalid repository list');
   return data.items.map((repo) => ({
     source: 'github-new', externalId: String(repo.id), title: repo.full_name,

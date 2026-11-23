@@ -16,7 +16,7 @@ function toPaper(raw: any): Paper | null {
 
 const API = 'https://huggingface.co/api';
 
-async function getPapers(path: string, transport: typeof fetch) {
+export async function getPapers(path: string, transport: typeof fetch) {
   const rows = await (await request(API + path, transport, { Accept: 'application/json' })).json();
   if (!Array.isArray(rows)) throw new Error('Hugging Face returned invalid papers');
   return rows.map(toPaper).filter((paper): paper is Paper => paper !== null);
