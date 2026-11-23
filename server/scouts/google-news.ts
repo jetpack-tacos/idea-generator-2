@@ -51,7 +51,7 @@ export async function fetch(
     }
     if (index) await wait(2000);
     const id = encodeURIComponent(feed.id);
-    // 'search' feeds are plain search words, for subjects Jer named that have no Google News topic.
+    // 'search' feeds are plain search words, for subjects the owner named that have no Google News topic.
     const target = feed.kind === 'topics' ? `topics/${id}?` : feed.kind === 'site' ? `search?q=site:${id}&` : `search?q=${id}&`;
     try {
       const response = await request(`https://news.google.com/rss/${target}hl=en-US&gl=US&ceid=US:en`, transport);

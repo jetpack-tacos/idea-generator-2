@@ -54,7 +54,7 @@ export async function fetch(
 
   const finds = new Map<string, Find>();
   for (const find of await search(`created:>${since}`, 30)) finds.set(find.externalId, find);
-  // Popular repos on Jer's chosen subjects that changed in the last week; the seen list drops repeats.
+  // Popular repos on the owner's chosen subjects that changed in the last week; the seen list drops repeats.
   for (const term of await keywordSearches(configPath)) {
     await wait(10_000);
     try {
