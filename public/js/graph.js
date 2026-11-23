@@ -16,7 +16,8 @@ const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-s
 
 export function radiusFor(idea) {
   const s = scoreSum(idea);
-  if (s != null) return 32 + (s - 3) * 3.2; // 3 → 32, 9 → 51, 13 → 64, 15 → 70
+  // Gold stands out on sight (owner 2026-11-23): a gold idea is drawn 1.4x the size its sum alone would give.
+  if (s != null) return (32 + (s - 3) * 3.2) * (medal(idea) === 3 ? 1.4 : 1); // 3 → 32, 9 → 51, 13 → 90
   if (Number.isInteger(idea.medalOverride)) return [44, 52, 60, 68][idea.medalOverride];
   return 46;
 }
@@ -416,8 +417,8 @@ export class Graph {
     ctx.globalAlpha = focus && !focus.set.has(n.id) ? 0.28 : 1;
 
     if (m === 3) {
-      ctx.shadowColor = 'rgba(245,197,66,0.55)';
-      ctx.shadowBlur = 28;
+      ctx.shadowColor = 'rgba(245,197,66,0.95)';
+      ctx.shadowBlur = 60;
     }
     const g = ctx.createRadialGradient(n.x - r * 0.35, n.y - r * 0.4, r * 0.1, n.x, n.y, r);
     g.addColorStop(0, color + 'cc');
@@ -428,9 +429,16 @@ export class Graph {
     ctx.fill();
     ctx.shadowBlur = 0;
 
-    ctx.lineWidth = m ? 3.5 : 1.5;
+    ctx.lineWidth = m === 3 ? 8 : m ? 3.5 : 1.5;
     ctx.strokeStyle = m ? MEDAL_COLORS[m] : color + '99';
     ctx.stroke();
+    if (m === 3) {
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, r + 10, 0, Math.PI * 2);
+      ctx.strokeStyle = MEDAL_COLORS[3];
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
 
     if (this.selected === n.id || this.pick === n.id) {
       ctx.beginPath();
