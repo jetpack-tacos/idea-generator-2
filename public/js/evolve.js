@@ -38,11 +38,29 @@ export function expandedIds(ideas, edges) {
   return out;
 }
 
-function tournament(pool, k, rng, tieBreak = () => false) {
+// Topic crowding (owner's yes 2026-11-23 3:41 AM to the topic-spread fix). Picking parents by score alone let one
+// topic snowball: agent ideas scored a little higher (10.85 against 10.50), got more children, and by 3 AM "agent"
+// was a keyword on 105 of the newest 200 ideas and 38 of the top 40 were about checking coding agents. A parent's
+// pick score now loses CROWD_WEIGHT points times the share of the newest CROWD_WINDOW ideas that carry its most
+// common keyword, so a crowded topic still breeds, but less often than an equally good fresh one.
+export const CROWD_WINDOW = 200;
+export const CROWD_WEIGHT = 4;
+const CROWD_MIN_IDEAS = 30; // below this the shares are noise
+
+/** Share (0-1) of the newest ideas that carry this idea's most common keyword. */
+export function crowding(ideas) {
+  const recent = [...ideas].sort((a, b) => b.id - a.id).slice(0, CROWD_WINDOW);
+  if (recent.length < CROWD_MIN_IDEAS) return () => 0;
+  const counts = new Map();
+  for (const i of recent) for (const k of new Set(i.keywords ?? [])) counts.set(k, (counts.get(k) ?? 0) + 1);
+  return (idea) => Math.max(0, ...(idea.keywords ?? []).map((k) => (counts.get(k) ?? 0) / recent.length));
+}
+
+function tournament(pool, k, rng, fit = fitness) {
   let best = null;
   for (let i = 0; i < k; i++) {
     const c = pool[Math.floor(rng() * pool.length)];
-    if (!best || fitness(c) > fitness(best) || (fitness(c) === fitness(best) && tieBreak(c, best))) best = c;
+    if (!best || fit(c) > fit(best)) best = c;
   }
   return best;
 }
@@ -88,13 +106,15 @@ function crossesSources(a, b) {
  * @returns {{type:'combine', a, b} | {type:'expand', idea} | null}
  */
 export function nextMove(ideas, edges, opts = {}) {
-  const { rng = Math.random, busy = new Set(), inFlight = new Set(), mutationRate = 0.2, k = 3, freshRate = 0.3 } = opts;
+  const { rng = Math.random, busy = new Set(), inFlight = new Set(), mutationRate = 0.2, k = 3, freshRate = 0.5, crowd = crowding(ideas) } = opts;
+  // freshRate 0.3 -> 0.5 with the topic-spread fix: half of the crosses now bring a new find onto the board.
+  const pickFit = (i) => fitness(i) - CROWD_WEIGHT * crowd(i);
   const pool = population(ideas).filter((i) => !busy.has(i.id));
   const expanded = expandedIds(ideas, edges);
   const used = usedPairs(ideas, edges);
 
   const bestUnexpanded = () =>
-    [...pool].sort((a, b) => fitness(b) - fitness(a)).find((i) => !expanded.has(i.id));
+    [...pool].sort((a, b) => pickFit(b) - pickFit(a)).find((i) => !expanded.has(i.id));
 
   if (pool.length < 3 || rng() < mutationRate) {
     const idea = bestUnexpanded();
@@ -108,7 +128,7 @@ export function nextMove(ideas, edges, opts = {}) {
   const bred = pool.filter((i) => i.kind !== 'seed');
   if (fresh.length && bred.length && rng() < freshRate) {
     {
-      const a = tournament(bred, k, rng);
+      const a = tournament(bred, k, rng, pickFit);
       const b = fresh[Math.floor(rng() * fresh.length)];
       const key = pairKey(a.id, b.id);
       if (!used.has(key) && !inFlight.has(key)) return { type: 'combine', a, b };
@@ -118,14 +138,14 @@ export function nextMove(ideas, edges, opts = {}) {
   if (pool.length >= 2) {
     const sourcesOf = lineageSources(ideas, edges);
     for (let attempt = 0; attempt < 40; attempt++) {
-      const a = tournament(pool, k, rng);
+      const a = tournament(pool, k, rng, pickFit);
       const rest = pool.filter((i) => i.id !== a.id);
       const aSources = sourcesOf(a.id);
       const crosses = (idea) => crossesSources(aSources, sourcesOf(idea.id));
       // Cross-pollination is the point (the owner's ask, 2026-11-22): the partner comes from a different
       // source whenever one exists. As a mere tie-break, 9 of the first 13 crosses stayed within one source.
       const crossing = rest.filter(crosses);
-      const b = tournament(crossing.length ? crossing : rest, k, rng);
+      const b = tournament(crossing.length ? crossing : rest, k, rng, pickFit);
       const key = pairKey(a.id, b.id);
       if (used.has(key) || inFlight.has(key)) continue;
       return { type: 'combine', a, b };

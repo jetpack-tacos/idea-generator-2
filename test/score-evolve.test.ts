@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { clampScore, fitness, medal, medalFromSum } from '../public/js/score.js';
-import { evolutionStats, expandedIds, nextMove, pairKey, usedPairs } from '../public/js/evolve.js';
+import { crowding, evolutionStats, expandedIds, nextMove, pairKey, usedPairs } from '../public/js/evolve.js';
 
 const idea = (id: number, sum: number | null, extra: any = {}) => {
   const base: any = { id, kind: 'expand', generation: 1, medalOverride: null, ...extra };
@@ -182,4 +182,28 @@ test('fresh material: a never-used seed is crossed with a bred idea now and then
   assert.equal(move.type, 'combine');
   assert.equal(move.b.id, 2, 'the seed that was never a parent');
   assert.notEqual(move.a.kind, 'seed');
+});
+
+test('a crowded topic loses parent picks to an equally good or slightly weaker fresh one', () => {
+  // 40 ideas: 30 carry the keyword "agent" (sum 12), 10 carry their own topic (sum 11).
+  const ideas = [
+    ...Array.from({ length: 30 }, (_, n) => idea(n + 1, 12, { keywords: ['agent', `a${n}`] })),
+    ...Array.from({ length: 10 }, (_, n) => idea(n + 31, 11, { keywords: [`topic${n}`] })),
+  ];
+  const crowd = crowding(ideas);
+  assert.equal(crowd(ideas[0]), 30 / 40);
+  assert.equal(crowd(ideas[30]), 1 / 40);
+  let agentPicks = 0;
+  const rng = rngFrom(7);
+  for (let n = 0; n < 400; n++) {
+    const m: any = nextMove(ideas, [], { rng, mutationRate: 0, freshRate: 0 });
+    if (m.a.keywords.includes('agent')) agentPicks++;
+  }
+  // By score alone the agent ideas (75% of the pool, one point higher) would win almost every tournament.
+  assert.ok(agentPicks < 200, `agent ideas picked ${agentPicks} of 400 times`);
+});
+
+test('crowding stays off on a small board', () => {
+  const ideas = Array.from({ length: 10 }, (_, n) => idea(n + 1, 12, { keywords: ['agent'] }));
+  assert.equal(crowding(ideas)(ideas[0]), 0);
 });

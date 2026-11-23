@@ -18,6 +18,9 @@ import { isCrewModel, ProviderError, type AppSettings, type ChatFn, type Role } 
 import { fitness, isJudged, medal, scoreSum } from '../public/js/score.js';
 import { nextMove } from '../public/js/evolve.js';
 
+/** Unused seeds the autopilot keeps waiting on the board, so crosses keep bringing in new finds. */
+export const FRESH_SEEDS_MIN = 3;
+
 export class AppError extends Error {
   status: number;
   code: string;
@@ -776,7 +779,7 @@ export function createEngine(deps: Deps) {
      */
     async autoStep(boardId: number): Promise<{ did: 'idle' | 'judge' | 'expand' | 'combine'; reason?: string; ids?: number[]; error?: { code: string; message: string } }> {
       const board = mustBoard(boardId);
-      const ideas = repo.listIdeas(boardId);
+      let ideas = repo.listIdeas(boardId);
       if (!ideas.length) return { did: 'idle', reason: 'empty' };
 
       const day = localDay(new Date(now()));
@@ -811,6 +814,22 @@ export function createEngine(deps: Deps) {
               ...(out.projectError ? { error: { code: out.projectErrorCode ?? 'gold_failed', message: out.projectError } } : {}),
             };
           }
+        }
+      }
+
+      // Keep new material on the board (topic-spread fix, owner's yes 2026-11-23 3:41 AM). Finds became seeds only
+      // right after a scout round, so by 3 AM 512 good finds waited while the board bred from itself. Now, whenever
+      // fewer than FRESH_SEEDS_MIN unused seeds are waiting, the next good find is seeded (judged on the next step).
+      const parented = new Set(repo.listEdges(boardId).map((e) => e.from));
+      const waitingSeeds = ideas.filter((i) => i.kind === 'seed' && !i.generation && !parented.has(i.id)).length;
+      if (waitingSeeds < FRESH_SEEDS_MIN) {
+        const s = deps.settings();
+        const [find] = repo.seedableFinds(s.seedThreshold, 1);
+        const seeded = find ? repo.seedFind(boardId, find.id, seedPosition(boardId, {})) : null;
+        if (seeded) {
+          emitIdeas(boardId, [seeded.idea]);
+          publishFinds();
+          ideas = repo.listIdeas(boardId);
         }
       }
 
