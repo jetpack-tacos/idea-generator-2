@@ -70,6 +70,20 @@ export function mergeAppSettings(raw: any, base = DEFAULT_APP_SETTINGS): AppSett
     }
     out.claudeFallback = { until: f.until, model: String(f.model ?? 'sonnet'), headlessPath };
   }
+  if (raw.creditRun !== undefined) {
+    const c = raw.creditRun ?? {};
+    if (typeof c.until !== 'string' || (c.until && !Number.isFinite(Date.parse(c.until))) ||
+      !Number.isFinite(c.maxUsd) || c.maxUsd < 0 || c.maxUsd > 500 || !c.models || typeof c.models !== 'object') {
+      throw new Error('creditRun needs until (ISO time or empty), maxUsd (0 to 500) and models');
+    }
+    const models: Record<string, string> = {};
+    for (const role of ROLES) {
+      if (typeof c.models[role] !== 'string' || !c.models[role].trim()) continue;
+      parseModel(c.models[role].trim());
+      models[role] = c.models[role].trim();
+    }
+    out.creditRun = { until: c.until, maxUsd: c.maxUsd, models };
+  }
   if (raw.crewCallsPerDay !== undefined) {
     const cap = raw.crewCallsPerDay;
     if (!Number.isSafeInteger(cap) || cap < 0 || cap > 10000) {

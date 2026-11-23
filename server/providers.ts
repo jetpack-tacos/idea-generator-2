@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,6 +38,8 @@ export type AppSettings = {
    * any task where we are using outside tools if they run out of quota"). Empty or past means off.
    */
   claudeFallback?: { until: string; model: string; headlessPath: string };
+  /** Roles sent to the Claude API credit until `until` or until `maxUsd` is spent (see makeChat). */
+  creditRun?: { until: string; maxUsd: number; models: Partial<Record<Role, string>> };
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -99,8 +102,10 @@ export function isCrewModel(ref: string): boolean {
 }
 
 export function keyFor(p: ApiProviderId): string | undefined {
+  // Jer's Claude API credit key lives only in CREW_ANTHROPIC_KEY (a user-level ANTHROPIC_API_KEY would move
+  // Claude Code itself off his plan; note claude-credits).
   const env = PROVIDERS[p].env;
-  return (env && process.env[env]) || undefined;
+  return (env && process.env[env]) || (p === 'anthropic' ? process.env.CREW_ANTHROPIC_KEY : undefined) || undefined;
 }
 
 type BaseUrls = Partial<Record<ApiProviderId, string>>;
@@ -527,7 +532,10 @@ export function makeChat({
   onFallback,
   claudePlan,
   openai,
+  creditLedger,
 }: {
+  /** File that records every dollar spent from the API credit (one JSON line per call). */
+  creditLedger?: string;
   /** Tests: the clock, a stand-in for the Claude plan and for the API call. */
   now?: () => number;
   onFallback?: (model: string, reason: string) => void;
@@ -541,10 +549,34 @@ export function makeChat({
   beforeCrew?: () => void;
 } = {}): ChatFn {
   const resolveCrewPath = crewPath ?? (() => settings?.().crewPath ?? '');
-  return async (r) => {
+  // Credit run (Jer 2026-11-23: "yes, start using the credit on Opus"): chosen roles go to the API credit until a
+  // cut-off, a dollar ceiling, or the credit running out, then back to the board's usual models. Its dollars go to
+  // their own ledger and are not counted against the daily cap meant for the cheap models.
+  let creditSpent = creditLedger ? readLedgerTotal(creditLedger) : 0;
+  let creditEmpty = false;
+  const chat: ChatFn = async (r) => {
+    const credit = settings?.().creditRun;
+    const creditModel = r.role ? credit?.models?.[r.role] : undefined;
+    if (!creditModel || creditEmpty || !creditRunOn(credit, now(), creditSpent)) return one(r);
+    try {
+      return await one({ ...r, model: creditModel }, (u) => {
+        creditSpent += u.costUsd;
+        if (creditLedger) appendLedger(creditLedger, { time: new Date(now()).toISOString(), model: creditModel, role: r.role!, ...u });
+        return { ...u, costUsd: 0 };
+      });
+    } catch (error: any) {
+      if (/credit balance|billing|insufficient/i.test(error?.message ?? '')) creditEmpty = true;
+      onFallback?.(creditModel, `credit run failed, using ${r.model}: ${error?.message ?? error}`);
+      return one(r);
+    }
+  };
+  return chat;
+
+  async function one(r: ChatRequest, credited?: (u: Usage) => Usage): Promise<ChatResult> {
     const { provider, model } = parseModel(r.model);
     let costUsd = 0;
-    const record = (usage: Usage) => {
+    const record = (raw: Usage) => {
+      const usage = credited ? credited(raw) : raw;
       costUsd += usage.costUsd;
       r.onUsage?.(usage);
       if (r.role) log?.({ model: `${provider}:${model}`, boardId: r.boardId ?? null, role: r.role, ...usage });
@@ -566,7 +598,27 @@ export function makeChat({
       if (r.role) log?.({ model: `claude-plan:${fallback!.model || 'sonnet'}`, boardId: r.boardId ?? null, role: r.role, ...ZERO_USAGE });
     }
     return { ...out, costUsd };
-  };
+  }
+}
+
+/** Is the credit run on: before its cut-off and under its dollar ceiling? */
+export function creditRunOn(credit: AppSettings['creditRun'], time: number, spent: number) {
+  const until = credit?.until ? Date.parse(credit.until) : NaN;
+  return Number.isFinite(until) && time < until && spent < (credit?.maxUsd ?? 0);
+}
+
+function readLedgerTotal(file: string) {
+  try {
+    return readFileSync(file, 'utf8').split(/\r?\n/).reduce((sum, line) => {
+      try { return sum + (Number(JSON.parse(line).costUsd) || 0); } catch { return sum; }
+    }, 0);
+  } catch {
+    return 0;
+  }
+}
+
+function appendLedger(file: string, entry: object) {
+  try { appendFileSync(file, JSON.stringify(entry) + '\n'); } catch { /* the ledger must not break a call */ }
 }
 
 /** Is the fallback to the Claude plan switched on at this moment? */

@@ -65,3 +65,30 @@ test('a non-quota failure is not sent to Claude', async () => {
   });
   await assert.rejects(chat({ model: 'deepseek:deepseek-flash', system: 's', user: 'u', schemaName: 'x', schema: {} } as any), /Empty answer/);
 });
+
+test('credit run sends its roles to the credit until the cut-off or ceiling, keeps the cap clear, then falls back', async () => {
+  const { mkdtempSync, readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  const ledger = join(mkdtempSync(join(tmpdir(), 'ideagen-credit-')), 'credit.jsonl');
+  const creditRun = { until: '2026-11-25T19:00:00-05:00', maxUsd: 0.05, models: { combine: 'anthropic:claude-opus-5-5' } };
+  let time = Date.parse('2026-11-23T10:00:00-05:00');
+  const asked: string[] = [];
+  const budget: number[] = [];
+  const answer = (model: string) => async (r: any) => { asked.push(r.model); return { value: { from: model }, costUsd: 0 }; };
+  const chat = makeChat({
+    settings: () => ({ creditRun }) as any, now: () => time, creditLedger: ledger,
+    openai: async (_p: any, model: string, r: any, _b: any, record: any) => { record({ inputTokens: 1, outputTokens: 1, costUsd: 0.001 }); return answer(model)(r); },
+  });
+  // Stand in for the Anthropic call by routing the credit model through the openai stub.
+  creditRun.models.combine = 'deepseek:opus-stand-in';
+  const r = (role: string) => ({ model: 'deepseek:deepseek-flash', role, system: 's', user: 'u', schemaName: 'x', schema: {}, onUsage: (u: any) => budget.push(u.costUsd) }) as any;
+  await chat(r('combine'));
+  await chat(r('judge'));
+  assert.deepEqual(asked, ['deepseek:opus-stand-in', 'deepseek:deepseek-flash'], 'only the listed role goes to the credit');
+  assert.deepEqual(budget, [0, 0.001], 'credit dollars stay off the daily cap');
+  assert.equal(readFileSync(ledger, 'utf8').trim().split('\n').length, 1, 'credit dollars go to the ledger');
+  time = Date.parse('2026-11-25T19:00:01-05:00');
+  await chat(r('combine'));
+  assert.equal(asked.at(-1), 'deepseek:deepseek-flash', 'after the cut-off it is back to the usual model');
+});

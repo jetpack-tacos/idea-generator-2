@@ -97,7 +97,8 @@ test('startup loads disk settings, waits overnight, then judges and budgets with
   assert.equal(oldConfig.flowName, 'Inventor');
   assert.doesNotMatch(oldConfig.flow.system, /TEST old preset/);
   assert.deepEqual(oldConfig.models, {});
-  assert.equal(service.repo.spentOn(board.id), 0.002);
+  // The test's own day, not the real calendar (it failed after midnight 2026-11-23).
+  assert.equal(service.repo.spentOn(board.id, '2026-11-22'), 0.002);
   assert.deepEqual(calls.map((c) => c.body.response_format.type), ['json_schema', 'json_object']);
   assert.ok(calls.every((c) => c.auth === 'Bearer test-env-key' && c.body.model === 'glm-5.3-flash'));
 

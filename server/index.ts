@@ -48,6 +48,7 @@ export function startServer({
   const repo = openDb(dbFile);
   const chat = makeChat({
     baseUrls, log: spendLogger(spendFile), settings: runtime.get, crewTimeoutMs,
+    creditLedger: spendFile === SPEND_FILE ? join(dirname(spendFile), 'credit.jsonl') : undefined,
     onFallback: (model, reason) => console.log(`[claude-plan] ${model} out of quota, asked Claude instead: ${reason.slice(0, 160)}`),
   });
   const engine = createEngine({
