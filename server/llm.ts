@@ -187,6 +187,12 @@ Would a thoughtful, tech-minded person really want this and keep using it once i
 FITS (return under fits)
 True only if the idea clearly uses or serves something on the owner's interests list. It is a small bonus, so never lower a score because an idea does not fit.
 
+EXAMPLES (they show where the scale's ends are; they are not topics to prefer or avoid)
+- "Receipt-to-warranty watcher: photograph any receipt; the phone reads the item and date, looks up the maker's warranty length, and reminds you a month before it lapses, with the claim page linked." New 3, Buildable 5, Worth having 5 (sum 13): a known kind of app, but almost everyone has lost a warranty claim and would keep this running for years.
+- "Overnight cough count per room: phones left in each room count coughs with an on-device sound model, and a weekly chart flags a room whose count climbs three nights in a row, warning of a cold spreading before anyone feels sick." New 5, Buildable 4, Worth having 4 (sum 13): nobody joins cough detection to a household early warning, and families with children would check it every week.
+- "Weather-themed to-do list: the task app's background colour follows today's forecast." New 1, Buildable 5, Worth having 1 (sum 7): an obvious mash-up that adds nothing either part lacks.
+An idea that serves a smaller group can still earn 5 on Worth having when the people in that group would use it often and miss it.
+
 A bare topic or single word is not an idea. Give it New 1 and at most 2 on Buildable and Worth having. If the idea never says what actually happens, score Buildable and Worth having at most 2; a short pitch that does say it is not vague. Explain the three scores in one concise sentence, with the main strength and weakness.`;
 
 /** Fitting the owner's interests adds one point to Worth having, never above 5: a bonus, never a gate. */
