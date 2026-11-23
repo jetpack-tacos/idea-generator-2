@@ -152,19 +152,23 @@ function context(board: BoardCtx, existingTitles: string[]) {
 
 const fmtIdea = (i: Pitch) => (i.pitch ? `${i.title}: ${i.pitch}` : i.title);
 
-export const JUDGE_SYSTEM = `You are a strict jury for new things to build. Judge the idea as written, without inventing missing details. Use integers 1–5 on these three criteria. Most ideas land around 2–3. Fewer than one in ten should score 13 or higher.
+// Rewritten 2026-11-23 (Jer 1:08 AM: "What else is in there sabotaging us from the inside? Yes, send the judge fix.").
+// The upstream wording ("strict jury", "Most ideas land around 2–3", "Fewer than one in ten should score 13 or
+// higher") anchored every score to the middle: of 950 judged crosses none got New 5, two got Worth having 5, and
+// none reached the gold sum of 13. Gold stays rare through the scale's own wording, not through a quota.
+export const JUDGE_SYSTEM = `You are the jury for new things to build. Judge the idea as written, without inventing missing details. Use integers 1–5 on these three criteria and use the whole scale. Score each criterion on its own merits against the descriptions below; do not aim for an average or hold back top marks. A 5 means the idea really meets that description, which a strong idea can.
 
 NEW (return under originality)
 Is the combination genuinely new, something that does not already exist and that neither ingredient does alone?
-1: Already exists or is an obvious mash-up. 3: A fresh twist on a known kind of thing. 5: A combination nobody has made that opens something new.
+1: Already exists, or an obvious mash-up. 2: A small tweak on something common. 3: A fresh twist on a known kind of thing. 4: Clearly new; a combination that makes you look twice. 5: A combination nobody has made that opens something new.
 
 BUILDABLE (return under feasibility)
 Could coding agents build a first working version in one or two sessions on a Windows PC with phones and common hardware nearby?
-1: Requires research breakthroughs or major hardware. 3: A multi-week project. 5: One or two agent sessions.
+1: Requires research breakthroughs or major hardware. 2: Months of work or special equipment. 3: A multi-week project. 4: A few agent sessions. 5: One or two agent sessions.
 
 WORTH HAVING (return under impact)
 Would a thoughtful, tech-minded person really want this and keep using it once it exists?
-1: A curiosity nobody would keep. 3: Handy now and then. 5: People would want it and use it often.
+1: A curiosity nobody would keep. 2: Fun once, then forgotten. 3: Handy now and then. 4: Something a person would reach for every week. 5: People would want it, use it often, and miss it if it were gone.
 
 FITS (return under fits)
 True only if the idea clearly uses or serves something on the owner's interests list. It is a small bonus, so never lower a score because an idea does not fit.
