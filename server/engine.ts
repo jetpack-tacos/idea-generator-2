@@ -824,7 +824,13 @@ export function createEngine(deps: Deps) {
       const waitingSeeds = ideas.filter((i) => i.kind === 'seed' && !i.generation && !parented.has(i.id)).length;
       if (waitingSeeds < FRESH_SEEDS_MIN) {
         const s = deps.settings();
-        const [find] = repo.seedableFinds(s.seedThreshold, 1);
+        // Take the source used least among the last 8 seeds: asked for one find, seedableFinds always gave the
+        // best-scoring source (the first real run seeded four GitHub repos in a row).
+        const recentSources = ideas.filter((i) => i.kind === 'seed' && !i.generation).sort((a, b) => b.id - a.id)
+          .slice(0, 8).map((i) => i.seedSource);
+        const used = (source: string) => recentSources.filter((x) => x === source).length;
+        const find = repo.seedableFinds(s.seedThreshold, 50)
+          .reduce<ReturnType<typeof repo.seedableFinds>[number] | undefined>((best, f) => (!best || used(f.source) < used(best.source) ? f : best), undefined);
         const seeded = find ? repo.seedFind(boardId, find.id, seedPosition(boardId, {})) : null;
         if (seeded) {
           emitIdeas(boardId, [seeded.idea]);
