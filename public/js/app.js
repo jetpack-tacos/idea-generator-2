@@ -923,9 +923,14 @@ function wire() {
   $('#board-goal').addEventListener('change', (e) => patchBoard({ goal: e.target.value }));
   for (const id of ['#board-title', '#board-goal']) $(id).addEventListener('keydown', (e) => e.key === 'Enter' && e.target.blur());
   $('#mode-toggle').addEventListener('click', () => patchBoard({ config: { mode: S.board.config.mode === 'auto' ? 'manual' : 'auto' } }).then(renderAutopilot));
+  // The Scouting panel starts open (owner's yes 2026-11-23 12:46 PM) and remembers being closed.
+  const leadsOpen = localStorage.getItem('leadsOpen') !== 'false';
+  $('#leads-panel').hidden = !leadsOpen;
+  $('#leads-btn').setAttribute('aria-expanded', String(leadsOpen));
   $('#leads-btn').addEventListener('click', () => {
     const p = $('#leads-panel');
     p.hidden = !p.hidden;
+    localStorage.setItem('leadsOpen', String(!p.hidden));
     $('#leads-btn').setAttribute('aria-expanded', String(!p.hidden));
     renderLeads();
   });
